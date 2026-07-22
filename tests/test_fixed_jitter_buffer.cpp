@@ -29,11 +29,26 @@ void fixed_jitter_buffer_counts_underruns() {
   assert(buffer.stats().underruns == 1);
 }
 
+void fixed_jitter_buffer_peeks_without_popping() {
+  udp_audio::jitter::FixedJitterBuffer<int, 8> buffer(3);
+
+  assert(buffer.push(4, 40));
+  assert(buffer.peek_expected(4).value() == 40);
+  assert(buffer.peek_expected(4).value() == 40);
+  assert(buffer.pop_expected(4).value() == 40);
+  assert(!buffer.peek_expected(4).has_value());
+
+  const auto& stats = buffer.stats();
+  assert(stats.inserted == 1);
+  assert(stats.popped == 1);
+  assert(stats.underruns == 0);
+}
+
 }  // namespace
 
 int test_fixed_jitter_buffer_main() {
   fixed_jitter_buffer_reorders_by_expected_sequence();
   fixed_jitter_buffer_counts_underruns();
+  fixed_jitter_buffer_peeks_without_popping();
   return 0;
 }
-

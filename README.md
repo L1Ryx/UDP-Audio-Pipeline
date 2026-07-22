@@ -95,6 +95,16 @@ Example:
 Missing packets are concealed by the Opus decoder and counted as `opus_plc_frames`
 in the summary.
 
+Add `fec` as the final argument to enable Opus in-band forward error correction:
+
+```sh
+./build/debug/udp_audio_opus_loopback 100 20 25 1337 recordings/chirp_opus_fec.wav chirp 64000 fec
+```
+
+FEC can recover some missing frames from repair data in the following packet. Recovered
+frames are counted as `opus_fec_frames`; any frame that cannot be recovered falls back
+to `opus_plc_frames`.
+
 ## Run The Playback Demo
 
 ```sh

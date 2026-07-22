@@ -54,6 +54,7 @@ struct ProgramOptions {
   std::string record_wav_path{};
   std::string source_mode = "sine";
   std::int32_t bitrate_bps = kDefaultBitrateBps;
+  std::string recovery_mode = "plc";
 };
 
 struct EncodedPacket {
@@ -83,6 +84,8 @@ struct LoopbackStats {
   std::size_t received = 0;
   std::size_t decoded = 0;
   std::size_t concealed = 0;
+  std::size_t fec_recovered = 0;
+  std::size_t plc_generated = 0;
   std::size_t datagrams = 0;
   std::size_t invalid_datagrams = 0;
   std::size_t opus_decode_errors = 0;
@@ -203,25 +206,25 @@ ProgramOptions parse_options(int argc, char** argv) {
 
   if (argc > 1 && !parse_unsigned_arg(std::string_view(argv[1]), options.frame_count)) {
     std::cerr << "Usage: udp_audio_opus_loopback [frame_count] [loss_percent] [jitter_ms] "
-                 "[seed] [record_wav] [source_mode] [bitrate_bps]\n";
+                 "[seed] [record_wav] [source_mode] [bitrate_bps] [recovery_mode]\n";
     options.frame_count = kDefaultFrameCount;
   }
 
   if (argc > 2 && !parse_unsigned_arg(std::string_view(argv[2]), options.loss_percent)) {
     std::cerr << "Usage: udp_audio_opus_loopback [frame_count] [loss_percent] [jitter_ms] "
-                 "[seed] [record_wav] [source_mode] [bitrate_bps]\n";
+                 "[seed] [record_wav] [source_mode] [bitrate_bps] [recovery_mode]\n";
     options.loss_percent = 0;
   }
 
   if (argc > 3 && !parse_unsigned_arg(std::string_view(argv[3]), options.jitter_ms)) {
     std::cerr << "Usage: udp_audio_opus_loopback [frame_count] [loss_percent] [jitter_ms] "
-                 "[seed] [record_wav] [source_mode] [bitrate_bps]\n";
+                 "[seed] [record_wav] [source_mode] [bitrate_bps] [recovery_mode]\n";
     options.jitter_ms = 0;
   }
 
   if (argc > 4 && !parse_unsigned_arg(std::string_view(argv[4]), options.seed)) {
     std::cerr << "Usage: udp_audio_opus_loopback [frame_count] [loss_percent] [jitter_ms] "
-                 "[seed] [record_wav] [source_mode] [bitrate_bps]\n";
+                 "[seed] [record_wav] [source_mode] [bitrate_bps] [recovery_mode]\n";
     options.seed = 1337;
   }
 
@@ -241,8 +244,18 @@ ProgramOptions parse_options(int argc, char** argv) {
 
   if (argc > 7 && !parse_unsigned_arg(std::string_view(argv[7]), options.bitrate_bps)) {
     std::cerr << "Usage: udp_audio_opus_loopback [frame_count] [loss_percent] [jitter_ms] "
-                 "[seed] [record_wav] [source_mode] [bitrate_bps]\n";
+                 "[seed] [record_wav] [source_mode] [bitrate_bps] [recovery_mode]\n";
     options.bitrate_bps = kDefaultBitrateBps;
+  }
+
+  if (argc > 8) {
+    const std::string_view mode(argv[8]);
+    if (mode == "plc" || mode == "fec") {
+      options.recovery_mode = std::string(mode);
+    } else {
+      std::cerr << "Unknown recovery mode '" << mode << "'. Use plc or fec.\n";
+      options.recovery_mode = "plc";
+    }
   }
 
   if (options.frame_count == 0) {
@@ -532,6 +545,32 @@ bool decode_opus_plc(OpusDecoder* decoder,
   }
 
   ++stats.concealed;
+  ++stats.plc_generated;
+  return true;
+}
+
+bool decode_opus_fec(OpusDecoder* decoder,
+                     const BufferedPacket& repair_packet,
+                     std::uint32_t missing_sequence,
+                     MonoAudioFrame& output,
+                     LoopbackStats& stats) {
+  const auto decoded_samples = opus_decode_float(
+    decoder, repair_packet.packet.payload.data(),
+    static_cast<opus_int32>(repair_packet.packet.payload_size), output.samples.data(),
+    static_cast<int>(udp_audio::audio::kFrameSamples), 1);
+
+  output.sequence = missing_sequence;
+  output.timestamp_samples =
+    missing_sequence * static_cast<std::uint32_t>(udp_audio::audio::kFrameSamples);
+
+  if (decoded_samples != static_cast<int>(udp_audio::audio::kFrameSamples)) {
+    ++stats.opus_decode_errors;
+    std::fill(output.samples.begin(), output.samples.end(), 0.0F);
+    return false;
+  }
+
+  ++stats.concealed;
+  ++stats.fec_recovered;
   return true;
 }
 
@@ -539,6 +578,7 @@ void play_expected_frame(std::uint32_t sequence,
                          OpusDecoder* decoder,
                          udp_audio::jitter::FixedJitterBuffer<BufferedPacket,
                                                                kJitterCapacityFrames>& jitter_buffer,
+                         bool use_fec,
                          WavWriter* recorder,
                          const std::vector<Clock::time_point>& sent_times,
                          LoopbackStats& stats) {
@@ -554,12 +594,22 @@ void play_expected_frame(std::uint32_t sequence,
   auto packet = jitter_buffer.pop_expected(sequence);
   MonoAudioFrame output_frame{};
   if (!packet.has_value()) {
-    static_cast<void>(decode_opus_plc(decoder, sequence, output_frame, stats));
+    bool recovered_with_fec = false;
+    if (use_fec) {
+      const auto repair_packet = jitter_buffer.peek_expected(sequence + 1U);
+      if (repair_packet.has_value()) {
+        recovered_with_fec = decode_opus_fec(decoder, *repair_packet, sequence, output_frame, stats);
+      }
+    }
+    if (!recovered_with_fec) {
+      static_cast<void>(decode_opus_plc(decoder, sequence, output_frame, stats));
+    }
     if (recorder != nullptr) {
       recorder->write_frame(output_frame);
     }
     std::cout << sequence << ',' << output_frame.timestamp_samples << ",,"
-              << playout_latency_ms << ",," << kJitterDepthFrames << ",opus_plc\n";
+              << playout_latency_ms << ",," << kJitterDepthFrames << ','
+              << (recovered_with_fec ? "opus_fec" : "opus_plc") << '\n';
     return;
   }
 
@@ -599,6 +649,11 @@ int main(int argc, char** argv) {
 
   opus_encoder_ctl(encoder, OPUS_SET_BITRATE(options.bitrate_bps));
   opus_encoder_ctl(encoder, OPUS_SET_SIGNAL(OPUS_SIGNAL_MUSIC));
+  const bool use_fec = options.recovery_mode == "fec";
+  opus_encoder_ctl(encoder, OPUS_SET_PACKET_LOSS_PERC(static_cast<opus_int32>(options.loss_percent)));
+  if (use_fec) {
+    opus_encoder_ctl(encoder, OPUS_SET_INBAND_FEC(1));
+  }
 
   std::error_code error;
   auto receiver = udp_audio::transport::UdpSocket::open_ipv4(error);
@@ -707,7 +762,7 @@ int main(int argc, char** argv) {
 
     if (i >= kJitterDepthFrames) {
       play_expected_frame(static_cast<std::uint32_t>(i - kJitterDepthFrames), decoder,
-                          jitter_buffer, active_recorder, sent_times, stats);
+                          jitter_buffer, use_fec, active_recorder, sent_times, stats);
     }
 
     next_send_time += std::chrono::milliseconds(udp_audio::audio::kFrameDurationMs);
@@ -759,7 +814,7 @@ int main(int argc, char** argv) {
       return 1;
     }
     play_expected_frame(static_cast<std::uint32_t>(sequence), decoder, jitter_buffer,
-                        active_recorder, sent_times, stats);
+                        use_fec, active_recorder, sent_times, stats);
     tail_play_time += std::chrono::milliseconds(udp_audio::audio::kFrameDurationMs);
   }
 
@@ -788,6 +843,8 @@ int main(int argc, char** argv) {
   std::cout << "opus_signal=music\n";
   std::cout << "opus_bitrate_bps=" << options.bitrate_bps << '\n';
   std::cout << "opus_frame_samples=" << udp_audio::audio::kFrameSamples << '\n';
+  std::cout << "opus_recovery_mode=" << options.recovery_mode << '\n';
+  std::cout << "opus_inband_fec=" << (use_fec ? 1 : 0) << '\n';
   std::cout << "configured_loss_percent=" << options.loss_percent << '\n';
   std::cout << "configured_jitter_ms=" << options.jitter_ms << '\n';
   std::cout << "seed=" << options.seed << '\n';
@@ -801,13 +858,16 @@ int main(int argc, char** argv) {
   std::cout << "received=" << stats.received << '\n';
   std::cout << "decoded=" << stats.decoded << '\n';
   std::cout << "concealed=" << stats.concealed << '\n';
+  std::cout << "fec_recovered=" << stats.fec_recovered << '\n';
+  std::cout << "plc_generated=" << stats.plc_generated << '\n';
   std::cout << "output_frames=" << output_frames << '\n';
   std::cout << "datagrams=" << stats.datagrams << '\n';
   std::cout << "invalid_datagrams=" << stats.invalid_datagrams << '\n';
   std::cout << "jitter_depth_frames=" << jitter_buffer.stats().target_depth_frames << '\n';
   std::cout << "jitter_underruns=" << jitter_buffer.stats().underruns << '\n';
   std::cout << "missing_frames=" << jitter_buffer.stats().underruns << '\n';
-  std::cout << "opus_plc_frames=" << stats.concealed << '\n';
+  std::cout << "opus_fec_frames=" << stats.fec_recovered << '\n';
+  std::cout << "opus_plc_frames=" << stats.plc_generated << '\n';
   std::cout << "opus_decode_errors=" << stats.opus_decode_errors << '\n';
   std::cout << "avg_opus_packet_bytes=" << average_packet_bytes << '\n';
   std::cout << "avg_network_latency_ms=" << average_latency << '\n';

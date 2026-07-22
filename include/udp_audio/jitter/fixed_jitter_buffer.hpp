@@ -50,6 +50,15 @@ class FixedJitterBuffer {
     return frames_[slot];
   }
 
+  std::optional<Frame> peek_expected(std::uint32_t sequence) const noexcept {
+    const auto slot = sequence % Capacity;
+    if (!occupied_[slot] || sequences_[slot] != sequence) {
+      return std::nullopt;
+    }
+
+    return frames_[slot];
+  }
+
   [[nodiscard]] const FixedJitterBufferStats& stats() const noexcept {
     return stats_;
   }
@@ -62,4 +71,3 @@ class FixedJitterBuffer {
 };
 
 }  // namespace udp_audio::jitter
-

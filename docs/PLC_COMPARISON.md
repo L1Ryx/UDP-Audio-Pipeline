@@ -87,6 +87,7 @@ for exactly one 480-sample frame.
 ./cmake-build-debug/udp_audio_opus_loopback 50 20 25 1337 recordings/opus_sine_plc.wav sine
 ./cmake-build-debug/udp_audio_opus_loopback 50 0 0 1337 recordings/chirp_opus_clean_50.wav chirp
 ./cmake-build-debug/udp_audio_opus_loopback 50 20 25 1337 recordings/chirp_opus_plc.wav chirp
+./cmake-build-debug/udp_audio_opus_loopback 50 20 25 1337 recordings/chirp_opus_fec.wav chirp 64000 fec
 ```
 
 These metrics compare the impaired Opus output against a clean Opus encode/decode
@@ -101,3 +102,19 @@ The chirp still has meaningful waveform error because no PLC can know the exact 
 frequency trajectory. The important improvement is continuity: the max adjacent delta
 stays near normal waveform motion instead of jumping to the roughly `0.20` discontinuity
 seen in the homegrown chirp modes.
+
+### Opus FEC Check
+
+Opus in-band FEC adds repair data to later packets. The receiver can recover a missing
+frame from the following packet if that following packet arrives before playout. With
+the same chirp impairment pattern, 6 packets were missing, 5 frames were recovered using
+FEC, and 1 frame fell back to normal Opus PLC.
+
+| Strategy | FEC Frames | PLC Frames | RMS Error vs Clean Opus | Max Error vs Clean Opus | Max Adjacent Delta |
+|---|---:|---:|---:|---:|---:|
+| Opus PLC | 0 | 6 | 0.078361 | 0.387838 | 0.019942 |
+| Opus FEC | 5 | 1 | 0.033517 | 0.136705 | 0.022919 |
+
+This is the first real recovery step beyond concealment. It does not make packet loss
+free, and it needs the next packet to arrive in time, but it preserves much more of the
+actual chirp than decoder PLC alone.
