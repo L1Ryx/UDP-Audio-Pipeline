@@ -36,13 +36,45 @@ ctest --preset debug
 Optional arguments:
 
 ```sh
-./build/debug/udp_audio_loopback [frames] [loss_percent] [jitter_ms] [seed]
+./build/debug/udp_audio_loopback [frames] [loss_percent] [jitter_ms] [seed] [play_audio] [record_wav] [plc_mode] [source_mode]
 ```
 
 Example with deterministic impairment:
 
 ```sh
 ./build/debug/udp_audio_loopback 50 10 20 1337
+```
+
+Set `play_audio` to `1` to play the jitter/PLC output through miniaudio:
+
+```sh
+./build/debug/udp_audio_loopback 100 10 20 1337 1
+```
+
+Record the receiver playout stream to a 48 kHz mono float WAV:
+
+```sh
+./build/debug/udp_audio_loopback 100 10 20 1337 0 recordings/output.wav
+```
+
+PLC modes for comparison:
+
+- `none`: missing frames become silence.
+- `repeat`: repeat the previous frame with decay.
+- `periodic`: estimate a whole-sample waveform period and continue it.
+- `periodic_interp`: estimate a fractional waveform period and continue it.
+
+```sh
+./build/debug/udp_audio_loopback 50 20 25 1337 0 recordings/plc_periodic_interp.wav periodic_interp
+```
+
+Source modes:
+
+- `sine`: steady 440 Hz tone.
+- `chirp`: 220 Hz to 880 Hz sweep.
+
+```sh
+./build/debug/udp_audio_loopback 100 20 25 1337 1 recordings/chirp_periodic_interp.wav periodic_interp chirp
 ```
 
 ## Run The Playback Demo

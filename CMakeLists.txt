@@ -61,7 +61,7 @@ target_link_libraries(udp_audio_smoke PRIVATE udp_audio_core)
 udp_audio_enable_warnings(udp_audio_smoke)
 
 add_executable(udp_audio_loopback apps/udp_audio_loopback.cpp)
-target_link_libraries(udp_audio_loopback PRIVATE udp_audio_core)
+target_link_libraries(udp_audio_loopback PRIVATE udp_audio_core miniaudio)
 udp_audio_enable_warnings(udp_audio_loopback)
 
 add_executable(udp_audio_miniaudio_playback apps/udp_audio_miniaudio_playback.cpp)
