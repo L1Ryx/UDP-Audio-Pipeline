@@ -8,6 +8,7 @@ project(
 
 option(UDP_AUDIO_BUILD_TESTS "Build smoke tests" ON)
 option(UDP_AUDIO_ENABLE_AVX2 "Enable AVX2 DSP kernels when building on x86/x64" ON)
+option(UDP_AUDIO_ENABLE_OPUS "Build Opus codec/PLC baseline when libopus is available" ON)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -63,6 +64,28 @@ udp_audio_enable_warnings(udp_audio_smoke)
 add_executable(udp_audio_loopback apps/udp_audio_loopback.cpp)
 target_link_libraries(udp_audio_loopback PRIVATE udp_audio_core miniaudio)
 udp_audio_enable_warnings(udp_audio_loopback)
+
+if(UDP_AUDIO_ENABLE_OPUS)
+  find_path(OPUS_INCLUDE_DIR
+    NAMES opus/opus.h
+    HINTS /opt/homebrew/include /usr/local/include)
+  find_library(OPUS_LIBRARY
+    NAMES opus
+    HINTS /opt/homebrew/lib /usr/local/lib)
+
+  if(OPUS_INCLUDE_DIR AND OPUS_LIBRARY)
+    add_library(Opus::opus UNKNOWN IMPORTED)
+    set_target_properties(Opus::opus PROPERTIES
+      IMPORTED_LOCATION "${OPUS_LIBRARY}"
+      INTERFACE_INCLUDE_DIRECTORIES "${OPUS_INCLUDE_DIR}")
+
+    add_executable(udp_audio_opus_loopback apps/udp_audio_opus_loopback.cpp)
+    target_link_libraries(udp_audio_opus_loopback PRIVATE udp_audio_core Opus::opus)
+    udp_audio_enable_warnings(udp_audio_opus_loopback)
+  else()
+    message(STATUS "libopus not found; udp_audio_opus_loopback will not be built")
+  endif()
+endif()
 
 add_executable(udp_audio_miniaudio_playback apps/udp_audio_miniaudio_playback.cpp)
 target_link_libraries(udp_audio_miniaudio_playback PRIVATE udp_audio_core miniaudio)

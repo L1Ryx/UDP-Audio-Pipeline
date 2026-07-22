@@ -1,22 +1,22 @@
 # PLC Comparison Notes
 
-These measurements compare packet-loss concealment modes using the same deterministic
-loopback scenario:
+These measurements compare the core packet-loss concealment modes using the same
+deterministic loopback scenario:
 
 ```sh
-./cmake-build-debug/udp_audio_loopback 50 20 25 1337 0 recordings/plc_none.wav none
-./cmake-build-debug/udp_audio_loopback 50 20 25 1337 0 recordings/plc_repeat.wav repeat
-./cmake-build-debug/udp_audio_loopback 50 20 25 1337 0 recordings/plc_periodic.wav periodic
-./cmake-build-debug/udp_audio_loopback 50 20 25 1337 0 recordings/plc_periodic_interp.wav periodic_interp
+./cmake-build-debug/udp_audio_loopback 50 20 25 1337 0 recordings/plc_none.wav none sine
+./cmake-build-debug/udp_audio_loopback 50 20 25 1337 0 recordings/plc_repeat.wav repeat sine
+./cmake-build-debug/udp_audio_loopback 50 20 25 1337 0 recordings/plc_periodic.wav periodic sine
+./cmake-build-debug/udp_audio_loopback 50 20 25 1337 0 recordings/plc_periodic_interp.wav periodic_interp sine
 ```
 
 Baseline:
 
 ```sh
-./cmake-build-debug/udp_audio_loopback 50 0 0 1337 0 recordings/clean_50.wav periodic_interp
+./cmake-build-debug/udp_audio_loopback 50 0 0 1337 0 recordings/clean_50.wav periodic_interp sine
 ```
 
-## Test Signal
+## Sine Test
 
 - 440 Hz sine wave
 - 48 kHz mono float PCM
@@ -26,31 +26,16 @@ Baseline:
 - Up to 25 ms deterministic delivery jitter
 - Seed: 1337
 
-## Results
-
 | Mode | Peak | RMS Error vs Clean | Max Error vs Clean | Max Adjacent Delta |
 |---|---:|---:|---:|---:|
 | none | 0.273106 | 0.051334 | 0.296620 | 0.013519 |
-| repeat | 0.394134 | 0.098304 | 0.552830 | 0.015555 |
-| periodic | 0.200000 | 0.000771 | 0.005236 | 0.012560 |
+| repeat | 0.200000 | 0.000866 | 0.011513 | 0.012688 |
+| periodic | 0.200000 | 0.000866 | 0.011513 | 0.012688 |
 | periodic_interp | 0.200000 | 0.000021 | 0.000152 | 0.011565 |
 
-## Interpretation
+## Chirp Test
 
-- `none` exposes the missing-frame problem directly: the stream drops to silence.
-- `repeat` confirms that naive frame repetition can be worse than silence for this signal,
-  because phase mismatch plus boundary correction can create large overshoot.
-- `periodic` estimates the recent waveform period and continues from one whole-sample
-  period ago, which keeps the concealed signal close to the clean sine wave.
-- `periodic_interp` uses the same period estimate but refines it with fractional-sample
-  interpolation. For this 440 Hz test tone, that matters because the true period at
-  48 kHz is about 109.09 samples, not an integer.
-
-The current best mode is `periodic_interp`.
-
-## Changing Pitch Check
-
-The loopback demo also supports a `chirp` source:
+The loopback demo also supports a changing-pitch chirp source:
 
 ```sh
 ./cmake-build-debug/udp_audio_loopback 50 0 0 1337 0 recordings/chirp_clean_50.wav periodic_interp chirp
@@ -60,60 +45,59 @@ The loopback demo also supports a `chirp` source:
 ./cmake-build-debug/udp_audio_loopback 50 20 25 1337 0 recordings/chirp_periodic_interp.wav periodic_interp chirp
 ```
 
-This sweeps from 220 Hz to 880 Hz over the 50-frame run. It is still synthetic, but it
-is harder than the steady sine wave because the expected period changes during a lost
-packet.
+This sweeps from 220 Hz to 880 Hz over the 50-frame run. It is harder than the steady
+sine wave because the expected period changes during a lost packet.
 
 | Mode | Peak | RMS Error vs Clean | Max Error vs Clean | Max Adjacent Delta |
 |---|---:|---:|---:|---:|
 | none | 0.343722 | 0.051531 | 0.322695 | 0.024803 |
-| repeat | 0.459466 | 0.074044 | 0.628483 | 0.026474 |
-| periodic | 0.200000 | 0.027555 | 0.220224 | 0.207200 |
+| repeat | 0.200481 | 0.027515 | 0.219705 | 0.207152 |
+| periodic | 0.200481 | 0.027515 | 0.219705 | 0.207152 |
 | periodic_interp | 0.200000 | 0.024291 | 0.194438 | 0.201478 |
 
-`periodic_interp` still has the lowest RMS and max error of the PLC modes, but it no
-longer disappears. The largest adjacent-sample jump happens at the resume boundary
-after a concealed frame, where the synthesized pitch has drifted away from the real
-incoming chirp.
+## Interpretation
 
-For the `periodic_interp` chirp run, concealed frame sequences were again
-`5, 13, 29, 32, 40, 48`. Per-frame RMS error during those concealed blocks ranged from
-about `0.065` to `0.079`, and the largest resume-boundary jump was about `0.201`.
+- `none` exposes the missing-frame problem directly: the output drops toward silence.
+- `repeat` is now pitch/correlation-based repetition when a reliable recent period is
+  available. It no longer blindly replays the last 10 ms packet.
+- `periodic` currently matches `repeat`: it repeats from one whole-sample estimated
+  period ago.
+- `periodic_interp` refines the estimated period with fractional-sample interpolation.
+  This is the best current mode on both test signals.
 
-![Chirp PLC waveform check](plc_waveform_chirp_periodic_interp_frame5.png)
+The original naive repeat popped because it repeated a 10 ms packet. For a 440 Hz sine,
+10 ms contains 4.4 cycles, so repeating the whole packet restarts the waveform at the
+wrong phase. The fixed repeat path instead repeats from the estimated waveform period.
 
-This is a useful failure mode: the PLC is synthesizing plausible audio during the loss,
-but the handoff back to real audio needs a smarter transition.
+The chirp still exposes a real limitation: pitch changes during the missing frame, so a
+period estimated before the loss can be stale when real audio resumes. That remaining
+artifact should be addressed by improving the core PLC/resynchronization strategy, not
+by adding more comparison modes.
 
-## Activation Check
+## Opus PLC Baseline
 
-`periodic_interp` sounds unusually clean on the sine-wave test, so it was verified
-against a fresh deterministic run:
+Opus gives us a serious reference implementation for packet-loss concealment. In this
+target, the sender encodes every 10 ms float PCM frame into an Opus packet, the same UDP
+impairment layer drops or delays encoded packets, and the receiver decodes in playout
+order. When a frame is missing, the receiver calls the Opus decoder with a null packet
+for exactly one 480-sample frame.
 
 ```sh
-./cmake-build-debug/udp_audio_loopback 50 20 25 1337 0 recordings/check_periodic_interp.wav periodic_interp
+./cmake-build-debug/udp_audio_opus_loopback 50 0 0 1337 recordings/opus_sine_clean_50.wav sine
+./cmake-build-debug/udp_audio_opus_loopback 50 20 25 1337 recordings/opus_sine_plc.wav sine
+./cmake-build-debug/udp_audio_opus_loopback 50 0 0 1337 recordings/chirp_opus_clean_50.wav chirp
+./cmake-build-debug/udp_audio_opus_loopback 50 20 25 1337 recordings/chirp_opus_plc.wav chirp
 ```
 
-That run reported:
+These metrics compare the impaired Opus output against a clean Opus encode/decode
+reference, so codec coloration is not counted as PLC error.
 
-- `concealed=6`
-- `jitter_underruns=6`
-- `missing_frames=6`
-- `plc_mode=periodic_interp`
-- Concealed frame sequences: `5, 13, 29, 32, 40, 48`
+| Source | Peak | RMS Error vs Clean Opus | Max Error vs Clean Opus | Max Adjacent Delta |
+|---|---:|---:|---:|---:|
+| sine | 0.204352 | 0.009511 | 0.099150 | 0.012298 |
+| chirp | 0.229507 | 0.078361 | 0.387838 | 0.019942 |
 
-Each concealed frame in the recorded WAV contained 480 nonzero samples, so the output
-was synthesized PLC audio rather than silence or an accidentally bypassed clean frame.
-For the concealed frames, the per-frame RMS error versus the clean reference was about
-`0.00006`, with max absolute error around `0.00015`.
-
-![PLC waveform check](plc_waveform_check_periodic_interp_frame5.png)
-
-The highlighted frame in the waveform is a missing 10 ms packet. The `periodic_interp`
-output stays nearly on top of the clean sine wave, while `none` visibly collapses toward
-silence and creates a discontinuity at the resume boundary.
-
-This result is credible because the test signal is a stable 440 Hz sine wave, which is
-an ideal case for periodic packet-loss concealment. Speech, music, transients, noise,
-and changing pitch will be harder; the goal there is not perfect reconstruction but a
-concealment that avoids sharp discontinuities and sounds plausibly continuous.
+The chirp still has meaningful waveform error because no PLC can know the exact missing
+frequency trajectory. The important improvement is continuity: the max adjacent delta
+stays near normal waveform motion instead of jumping to the roughly `0.20` discontinuity
+seen in the homegrown chirp modes.

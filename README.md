@@ -23,6 +23,7 @@ ctest --preset debug
 - POSIX UDP socket wrapper.
 - Local UDP loopback demo with fixed jitter-buffer playout telemetry.
 - Hold-and-decay PLC for concealed output frames during jitter-buffer underruns.
+- Opus encode/decode loopback baseline using decoder-side PLC.
 - miniaudio playback demo using a real audio callback.
 - Lock-free SPSC queue.
 - Starter jitter buffer, PLC, scalar DSP, and AVX2 DSP paths.
@@ -76,6 +77,23 @@ Source modes:
 ```sh
 ./build/debug/udp_audio_loopback 100 20 25 1337 1 recordings/chirp_periodic_interp.wav periodic_interp chirp
 ```
+
+## Run The Opus Baseline
+
+If `libopus` is installed, CMake builds an Opus loopback target:
+
+```sh
+./build/debug/udp_audio_opus_loopback [frames] [loss_percent] [jitter_ms] [seed] [record_wav] [source_mode] [bitrate_bps]
+```
+
+Example:
+
+```sh
+./build/debug/udp_audio_opus_loopback 100 20 25 1337 recordings/chirp_opus_plc.wav chirp
+```
+
+Missing packets are concealed by the Opus decoder and counted as `opus_plc_frames`
+in the summary.
 
 ## Run The Playback Demo
 

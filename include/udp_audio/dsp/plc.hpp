@@ -31,9 +31,18 @@ class HoldAndDecayPlc {
     std::span<float, FrameSamples> out,
     PlcSynthesisMode mode = PlcSynthesisMode::periodic_interpolated) noexcept {
     const auto period =
-      mode == PlcSynthesisMode::periodic || mode == PlcSynthesisMode::periodic_interpolated
+      mode == PlcSynthesisMode::repeat_last_frame || mode == PlcSynthesisMode::periodic ||
+          mode == PlcSynthesisMode::periodic_interpolated
         ? estimate_period()
         : PeriodEstimate{};
+    const float correction =
+      period.valid && history_size_ > 0 && mode != PlcSynthesisMode::periodic_interpolated
+        ? sample_from_recent(std::size_t{1U}) -
+            ((mode == PlcSynthesisMode::periodic_interpolated
+                ? sample_from_recent(period.fractional_lag)
+                : sample_from_recent(period.integer_lag)) *
+              concealment_gain_)
+        : 0.0F;
 
     for (std::size_t i = 0; i < FrameSamples; ++i) {
       const float source =
@@ -42,15 +51,15 @@ class HoldAndDecayPlc {
                ? sample_from_recent(period.fractional_lag)
                : sample_from_recent(period.integer_lag))
           : last_good_frame_[i];
-      out[i] = source * concealment_gain_;
+      out[i] = (source * concealment_gain_) + start_correction(i, correction);
       append_history(out[i]);
     }
-
     concealment_gain_ *= kGainDecayPerLostFrame;
   }
 
  private:
   static constexpr std::size_t kHistorySamples = FrameSamples * 4U;
+  static constexpr std::size_t kStartSmoothingSamples = 32U;
 
   struct PeriodEstimate {
     std::size_t integer_lag = 0;
@@ -108,6 +117,20 @@ class HoldAndDecayPlc {
 
     const float denominator = std::sqrt(recent_energy * delayed_energy);
     return denominator > 0.000001F ? cross / denominator : 0.0F;
+  }
+
+  [[nodiscard]] float start_correction(std::size_t index, float correction) const noexcept {
+    constexpr auto samples = std::min<std::size_t>(kStartSmoothingSamples, FrameSamples);
+    if constexpr (samples <= 1U) {
+      return 0.0F;
+    } else {
+      if (index >= samples) {
+        return 0.0F;
+      }
+      const float t = static_cast<float>(index) / static_cast<float>(samples - 1U);
+      const float fade = (1.0F - t) * (1.0F - t) * (1.0F - t);
+      return correction * fade;
+    }
   }
 
   [[nodiscard]] PeriodEstimate estimate_period() const noexcept {
