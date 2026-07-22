@@ -30,6 +30,7 @@ endif()
 
 add_library(udp_audio_core
   src/audio/frame.cpp
+  src/audio/source.cpp
   src/dsp/gain.cpp
   src/dsp/gain_scalar.cpp
   src/dsp/plc.cpp
@@ -86,6 +87,19 @@ if(UDP_AUDIO_ENABLE_OPUS)
     target_link_libraries(udp_audio_opus_loopback PRIVATE udp_audio_core miniaudio Opus::opus)
     udp_audio_enable_warnings(udp_audio_opus_loopback)
 
+    add_library(udp_audio_opus_sim STATIC
+      src/sim/opus_playout_sim.cpp)
+    target_link_libraries(udp_audio_opus_sim PUBLIC udp_audio_core Opus::opus)
+    target_compile_features(udp_audio_opus_sim PUBLIC cxx_std_20)
+    udp_audio_enable_warnings(udp_audio_opus_sim)
+
+    if(UDP_AUDIO_BUILD_TESTS)
+      add_executable(udp_audio_opus_tests tests/test_opus_sim.cpp)
+      target_link_libraries(udp_audio_opus_tests PRIVATE udp_audio_opus_sim)
+      udp_audio_enable_warnings(udp_audio_opus_tests)
+      add_test(NAME udp_audio_opus_tests COMMAND udp_audio_opus_tests)
+    endif()
+
     if(SDL3_FOUND AND OpenGL_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/imgui/imgui.cpp")
       add_library(imgui_sdl3_opengl STATIC
         external/imgui/imgui.cpp
@@ -106,9 +120,8 @@ if(UDP_AUDIO_ENABLE_OPUS)
       add_executable(udp_audio_imgui_lab apps/udp_audio_imgui_lab.cpp)
       target_link_libraries(udp_audio_imgui_lab
         PRIVATE
-          udp_audio_core
+          udp_audio_opus_sim
           miniaudio
-          Opus::opus
           imgui_sdl3_opengl)
       udp_audio_enable_warnings(udp_audio_imgui_lab)
     else()

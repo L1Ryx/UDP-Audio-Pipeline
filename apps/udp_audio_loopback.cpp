@@ -1,4 +1,5 @@
 #include "udp_audio/audio/frame.hpp"
+#include "udp_audio/audio/source.hpp"
 #include "udp_audio/concurrency/spsc_ring_buffer.hpp"
 #include "udp_audio/dsp/plc.hpp"
 #include "udp_audio/jitter/adaptive_jitter_buffer.hpp"
@@ -13,7 +14,6 @@
 #include <atomic>
 #include <charconv>
 #include <chrono>
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -34,11 +34,6 @@ namespace {
 using Clock = std::chrono::steady_clock;
 using udp_audio::audio::MonoAudioFrame;
 
-constexpr double kPi = 3.14159265358979323846;
-constexpr double kToneHz = 440.0;
-constexpr double kChirpStartHz = 220.0;
-constexpr double kChirpEndHz = 880.0;
-constexpr float kToneGain = 0.2F;
 constexpr std::size_t kDefaultFrameCount = 100;
 constexpr std::size_t kJitterDepthFrames = 3;
 constexpr std::size_t kAdaptiveMaxJitterDepthFrames = 8;
@@ -86,21 +81,16 @@ PlcMode parse_plc_mode(std::string_view value) {
   return PlcMode::periodic_interp;
 }
 
-enum class SourceMode {
-  sine,
-  chirp,
-};
-
 enum class JitterBufferMode {
   fixed,
   adaptive,
 };
 
-SourceMode parse_source_mode(std::string_view value) {
+udp_audio::audio::SourceMode parse_source_mode(std::string_view value) {
   if (value == "chirp") {
-    return SourceMode::chirp;
+    return udp_audio::audio::SourceMode::chirp;
   }
-  return SourceMode::sine;
+  return udp_audio::audio::SourceMode::sine;
 }
 
 JitterBufferMode parse_jitter_buffer_mode(std::string_view value) {
@@ -351,67 +341,6 @@ ProgramOptions parse_options(int argc, char** argv) {
   options.loss_percent = std::min<std::uint32_t>(options.loss_percent, 100);
   options.play_audio = play_audio != 0;
   return options;
-}
-
-MonoAudioFrame make_sine_frame(std::uint32_t sequence, double& phase) {
-  MonoAudioFrame frame{};
-  frame.sequence = sequence;
-  frame.timestamp_samples =
-    sequence * static_cast<std::uint32_t>(udp_audio::audio::kFrameSamples);
-
-  const double phase_step =
-    (2.0 * kPi * kToneHz) / static_cast<double>(udp_audio::audio::kSampleRateHz);
-
-  for (float& sample : frame.samples) {
-    sample = static_cast<float>(std::sin(phase)) * kToneGain;
-    phase += phase_step;
-    if (phase >= 2.0 * kPi) {
-      phase -= 2.0 * kPi;
-    }
-  }
-
-  return frame;
-}
-
-MonoAudioFrame make_chirp_frame(std::uint32_t sequence,
-                                std::size_t total_frames,
-                                double& phase) {
-  MonoAudioFrame frame{};
-  frame.sequence = sequence;
-  frame.timestamp_samples =
-    sequence * static_cast<std::uint32_t>(udp_audio::audio::kFrameSamples);
-
-  const auto total_samples =
-    std::max<std::size_t>(1U, total_frames * udp_audio::audio::kFrameSamples);
-
-  for (std::size_t i = 0; i < frame.samples.size(); ++i) {
-    const auto absolute_sample =
-      static_cast<std::size_t>(sequence) * udp_audio::audio::kFrameSamples + i;
-    const double progress =
-      static_cast<double>(std::min(absolute_sample, total_samples - 1U)) /
-      static_cast<double>(total_samples - 1U);
-    const double frequency = kChirpStartHz + ((kChirpEndHz - kChirpStartHz) * progress);
-    const double phase_step =
-      (2.0 * kPi * frequency) / static_cast<double>(udp_audio::audio::kSampleRateHz);
-
-    frame.samples[i] = static_cast<float>(std::sin(phase)) * kToneGain;
-    phase += phase_step;
-    if (phase >= 2.0 * kPi) {
-      phase -= 2.0 * kPi;
-    }
-  }
-
-  return frame;
-}
-
-MonoAudioFrame make_source_frame(SourceMode source_mode,
-                                 std::uint32_t sequence,
-                                 std::size_t total_frames,
-                                 double& phase) {
-  if (source_mode == SourceMode::chirp) {
-    return make_chirp_frame(sequence, total_frames, phase);
-  }
-  return make_sine_frame(sequence, phase);
 }
 
 PacketBytes make_packet(const MonoAudioFrame& frame) {
@@ -845,7 +774,7 @@ int main(int argc, char** argv) {
   LoopbackStats stats{};
   std::deque<PendingPacket> pending_packets;
   std::mt19937 rng(options.seed);
-  double phase = 0.0;
+  udp_audio::audio::SourceState source_state{};
   const auto stream_start = Clock::now();
   auto next_send_time = stream_start;
   std::uint32_t next_play_sequence = 0;
@@ -862,8 +791,9 @@ int main(int argc, char** argv) {
   for (std::size_t i = 0; i < frame_count; ++i) {
     std::this_thread::sleep_until(next_send_time);
 
-    const auto frame = make_source_frame(source_mode, static_cast<std::uint32_t>(i),
-                                         frame_count, phase);
+    const auto frame =
+      udp_audio::audio::make_source_frame(source_mode, static_cast<std::uint32_t>(i),
+                                          frame_count, source_state);
     const auto packet = make_packet(frame);
     sent_times[i] = Clock::now();
 
