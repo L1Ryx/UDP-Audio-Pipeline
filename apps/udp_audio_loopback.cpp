@@ -1,4 +1,5 @@
 #include "udp_audio/audio/frame.hpp"
+#include "udp_audio/dsp/plc.hpp"
 #include "udp_audio/jitter/fixed_jitter_buffer.hpp"
 #include "udp_audio/protocol/packet.hpp"
 #include "udp_audio/transport/udp_socket.hpp"
@@ -56,6 +57,7 @@ struct LoopbackStats {
   std::size_t sent = 0;
   std::size_t received = 0;
   std::size_t played = 0;
+  std::size_t concealed = 0;
   std::size_t datagrams = 0;
   std::size_t invalid_datagrams = 0;
   std::uint32_t previous_sequence = 0;
@@ -290,19 +292,35 @@ void schedule_packet(PacketBytes packet,
 void play_expected_frame(std::uint32_t sequence,
                          udp_audio::jitter::FixedJitterBuffer<BufferedFrame,
                                                                kJitterCapacityFrames>& jitter_buffer,
+                         udp_audio::dsp::HoldAndDecayPlc<udp_audio::audio::kFrameSamples>& plc,
                          const std::vector<Clock::time_point>& sent_times,
                          LoopbackStats& stats) {
   const auto now = Clock::now();
-  auto frame = jitter_buffer.pop_expected(sequence);
-  if (!frame.has_value()) {
-    std::cout << sequence << ",,,,," << kJitterDepthFrames << ",underrun\n";
-    return;
-  }
-
   const double playout_latency_ms =
     sequence < sent_times.size()
       ? std::chrono::duration<double, std::milli>(now - sent_times[sequence]).count()
       : 0.0;
+
+  auto frame = jitter_buffer.pop_expected(sequence);
+  if (!frame.has_value()) {
+    MonoAudioFrame concealed_frame{};
+    concealed_frame.sequence = sequence;
+    concealed_frame.timestamp_samples =
+      sequence * static_cast<std::uint32_t>(udp_audio::audio::kFrameSamples);
+    plc.synthesize_missing_frame(
+      std::span<float, udp_audio::audio::kFrameSamples>(concealed_frame.samples));
+
+    stats.playout_latency_sum_ms += playout_latency_ms;
+    stats.playout_latency_max_ms = std::max(stats.playout_latency_max_ms, playout_latency_ms);
+    ++stats.concealed;
+
+    std::cout << sequence << ',' << concealed_frame.timestamp_samples << ",,"
+              << playout_latency_ms << ",," << kJitterDepthFrames << ",concealed\n";
+    return;
+  }
+
+  plc.accept_good_frame(
+    std::span<const float, udp_audio::audio::kFrameSamples>(frame->frame.samples));
   stats.playout_latency_sum_ms += playout_latency_ms;
   stats.playout_latency_max_ms = std::max(stats.playout_latency_max_ms, playout_latency_ms);
   ++stats.played;
@@ -346,6 +364,7 @@ int main(int argc, char** argv) {
   std::vector<Clock::time_point> sent_times(frame_count);
   udp_audio::jitter::FixedJitterBuffer<BufferedFrame, kJitterCapacityFrames> jitter_buffer(
     kJitterDepthFrames);
+  udp_audio::dsp::HoldAndDecayPlc<udp_audio::audio::kFrameSamples> plc;
   LoopbackStats stats{};
   std::deque<PendingPacket> pending_packets;
   std::mt19937 rng(options.seed);
@@ -388,7 +407,7 @@ int main(int argc, char** argv) {
 
     if (i >= kJitterDepthFrames) {
       play_expected_frame(static_cast<std::uint32_t>(i - kJitterDepthFrames), jitter_buffer,
-                          sent_times, stats);
+                          plc, sent_times, stats);
     }
 
     next_send_time += std::chrono::milliseconds(udp_audio::audio::kFrameDurationMs);
@@ -427,14 +446,16 @@ int main(int argc, char** argv) {
       std::cerr << "Failed to drain receiver before tail playout: " << error.message() << '\n';
       return 1;
     }
-    play_expected_frame(static_cast<std::uint32_t>(sequence), jitter_buffer, sent_times, stats);
+    play_expected_frame(static_cast<std::uint32_t>(sequence), jitter_buffer, plc, sent_times,
+                        stats);
     tail_play_time += std::chrono::milliseconds(udp_audio::audio::kFrameDurationMs);
   }
 
   const auto average_latency =
     stats.received == 0 ? 0.0 : stats.latency_sum_ms / static_cast<double>(stats.received);
+  const auto output_frames = stats.played + stats.concealed;
   const auto average_playout_latency =
-    stats.played == 0 ? 0.0 : stats.playout_latency_sum_ms / static_cast<double>(stats.played);
+    output_frames == 0 ? 0.0 : stats.playout_latency_sum_ms / static_cast<double>(output_frames);
   const auto inter_arrival_samples = stats.received > 1 ? stats.received - 1U : 0U;
   const auto average_inter_arrival =
     inter_arrival_samples == 0
@@ -451,11 +472,14 @@ int main(int argc, char** argv) {
   std::cout << "sent=" << stats.sent << '\n';
   std::cout << "received=" << stats.received << '\n';
   std::cout << "played=" << stats.played << '\n';
+  std::cout << "concealed=" << stats.concealed << '\n';
+  std::cout << "output_frames=" << output_frames << '\n';
   std::cout << "datagrams=" << stats.datagrams << '\n';
   std::cout << "invalid_datagrams=" << stats.invalid_datagrams << '\n';
   std::cout << "jitter_depth_frames=" << jitter_buffer.stats().target_depth_frames << '\n';
   std::cout << "jitter_underruns=" << jitter_buffer.stats().underruns << '\n';
   std::cout << "missing_frames=" << jitter_buffer.stats().underruns << '\n';
+  std::cout << "plc_mode=hold_and_decay\n";
   std::cout << "avg_network_latency_ms=" << average_latency << '\n';
   std::cout << "min_network_latency_ms=" << (stats.received == 0 ? 0.0 : stats.latency_min_ms)
             << '\n';

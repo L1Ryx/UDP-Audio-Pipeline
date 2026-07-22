@@ -22,6 +22,7 @@ ctest --preset debug
 - 16-byte UDP packet header.
 - POSIX UDP socket wrapper.
 - Local UDP loopback demo with fixed jitter-buffer playout telemetry.
+- Hold-and-decay PLC for concealed output frames during jitter-buffer underruns.
 - Lock-free SPSC queue.
 - Starter jitter buffer, PLC, scalar DSP, and AVX2 DSP paths.
 
