@@ -8,6 +8,7 @@ project(
 
 option(UDP_AUDIO_BUILD_TESTS "Build smoke tests" ON)
 option(UDP_AUDIO_ENABLE_AVX2 "Enable AVX2 DSP kernels when building on x86/x64" ON)
+option(UDP_AUDIO_ENABLE_NEON "Enable NEON DSP kernels when building on ARM64/AArch64" ON)
 option(UDP_AUDIO_ENABLE_OPUS "Build Opus codec/PLC baseline when libopus is available" ON)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -30,7 +31,9 @@ endif()
 
 add_library(udp_audio_core
   src/audio/frame.cpp
+  src/audio/wav_writer.cpp
   src/audio/source.cpp
+  src/codec/opus_packet.cpp
   src/dsp/gain.cpp
   src/dsp/gain_scalar.cpp
   src/dsp/plc.cpp
@@ -58,9 +61,21 @@ else()
   message(STATUS "AVX2 kernels disabled for processor: ${CMAKE_SYSTEM_PROCESSOR}")
 endif()
 
+if(UDP_AUDIO_ENABLE_NEON AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64|ARM64|AARCH64)$")
+  target_sources(udp_audio_core PRIVATE src/dsp/gain_neon.cpp)
+  target_compile_definitions(udp_audio_core PRIVATE UDP_AUDIO_HAS_NEON=1)
+  message(STATUS "NEON kernels enabled for processor: ${CMAKE_SYSTEM_PROCESSOR}")
+else()
+  message(STATUS "NEON kernels disabled for processor: ${CMAKE_SYSTEM_PROCESSOR}")
+endif()
+
 add_executable(udp_audio_smoke apps/udp_audio_smoke.cpp)
 target_link_libraries(udp_audio_smoke PRIVATE udp_audio_core)
 udp_audio_enable_warnings(udp_audio_smoke)
+
+add_executable(udp_audio_dsp_bench apps/udp_audio_dsp_bench.cpp)
+target_link_libraries(udp_audio_dsp_bench PRIVATE udp_audio_core)
+udp_audio_enable_warnings(udp_audio_dsp_bench)
 
 add_executable(udp_audio_loopback apps/udp_audio_loopback.cpp)
 target_link_libraries(udp_audio_loopback PRIVATE udp_audio_core miniaudio)
@@ -140,9 +155,11 @@ if(UDP_AUDIO_BUILD_TESTS)
   enable_testing()
   add_executable(udp_audio_tests
     tests/test_main.cpp
+    tests/test_audio_io.cpp
     tests/test_dsp.cpp
     tests/test_audio_frame.cpp
     tests/test_fixed_jitter_buffer.cpp
+    tests/test_opus_packet.cpp
     tests/test_packet.cpp
     tests/test_plc.cpp
     tests/test_spsc_ring_buffer.cpp

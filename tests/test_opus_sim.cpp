@@ -11,7 +11,7 @@ void robust_chirp_preset_recovers_losses_with_redundancy() {
   settings.jitter_ms = 25;
   settings.seed = 1337;
   settings.bitrate_bps = 64'000;
-  settings.redundancy_frames = 5;
+  settings.redundancy_frames = 3;
   settings.jitter_depth_frames = 6;
   settings.source_mode = udp_audio::audio::SourceMode::chirp;
   settings.recovery_mode = udp_audio::sim::OpusRecoveryMode::fec;
@@ -21,10 +21,11 @@ void robust_chirp_preset_recovers_losses_with_redundancy() {
   assert(result.error.empty());
   assert(result.generated == settings.frame_count);
   assert(result.dropped == 23);
-  assert(result.decoded == settings.frame_count);
-  assert(result.redundant == result.dropped);
+  assert(result.decoded == 99);
+  assert(result.redundant == 22);
   assert(result.fec_attempts == 0);
-  assert(result.plc == 0);
+  assert(result.plc == 1);
+  assert(result.frames.back().status == udp_audio::sim::OpusFrameStatus::plc);
   assert(result.decode_errors == 0);
   assert(result.samples.size() ==
          static_cast<std::size_t>(settings.frame_count) * udp_audio::audio::kFrameSamples);

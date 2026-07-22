@@ -1,6 +1,8 @@
 #include "udp_audio/audio/frame.hpp"
+#include "udp_audio/audio/frame_playback_queue.hpp"
 #include "udp_audio/audio/source.hpp"
-#include "udp_audio/concurrency/spsc_ring_buffer.hpp"
+#include "udp_audio/audio/wav_writer.hpp"
+#include "udp_audio/codec/opus_packet.hpp"
 #include "udp_audio/jitter/fixed_jitter_buffer.hpp"
 #include "udp_audio/protocol/packet.hpp"
 #include "udp_audio/transport/udp_socket.hpp"
@@ -18,7 +20,6 @@
 #include <cstdint>
 #include <cstring>
 #include <deque>
-#include <fstream>
 #include <iostream>
 #include <limits>
 #include <random>
@@ -41,8 +42,7 @@ constexpr std::size_t kPlaybackQueueCapacityFrames = 256;
 constexpr std::size_t kPlaybackPrerollFrames = 4;
 constexpr std::size_t kPlaybackFadeOutFrames = 1;
 constexpr std::size_t kPlaybackFadeOutSamples = 96;
-constexpr std::size_t kMaxOpusPacketBytes = 1500;
-constexpr std::size_t kMaxRedundantOpusFrames = 3;
+constexpr std::size_t kMaxRedundantOpusFrames = udp_audio::codec::kMaxRedundantOpusFrames;
 constexpr std::size_t kDefaultRedundantOpusFrames = 3;
 constexpr std::int32_t kDefaultBitrateBps = 64000;
 
@@ -60,12 +60,7 @@ struct ProgramOptions {
   std::size_t jitter_depth_frames = kDefaultJitterDepthFrames;
 };
 
-struct EncodedPacket {
-  std::array<unsigned char, kMaxOpusPacketBytes> payload{};
-  std::size_t payload_size = 0;
-  std::uint32_t sequence = 0;
-  std::uint32_t timestamp_samples = 0;
-};
+using EncodedPacket = udp_audio::codec::EncodedOpusPacket;
 
 struct BufferedPacket {
   EncodedPacket packet{};
@@ -81,21 +76,8 @@ struct PendingPacket {
   Clock::time_point deliver_at{};
 };
 
-struct PlaybackStats {
-  std::atomic<std::uint64_t> preroll_frames{0};
-  std::atomic<std::uint64_t> fadeout_frames{0};
-  std::atomic<std::uint64_t> enqueued_output_frames{0};
-  std::atomic<std::uint64_t> rendered_device_frames{0};
-  std::atomic<std::uint64_t> callback_underruns{0};
-  std::atomic<std::uint64_t> dropped_output_frames{0};
-};
-
-struct PlaybackState {
-  udp_audio::concurrency::SpscRingBuffer<MonoAudioFrame, kPlaybackQueueCapacityFrames> queue;
-  MonoAudioFrame current_frame{};
-  std::size_t current_offset = udp_audio::audio::kFrameSamples;
-  PlaybackStats stats{};
-};
+using PlaybackState = udp_audio::audio::FramePlaybackQueue<kPlaybackQueueCapacityFrames>;
+using WavWriter = udp_audio::audio::WavWriter;
 
 struct LoopbackStats {
   std::size_t generated = 0;
@@ -122,100 +104,6 @@ struct LoopbackStats {
   double playout_latency_max_ms = 0.0;
   double inter_arrival_sum_ms = 0.0;
   double inter_arrival_max_ms = 0.0;
-};
-
-class WavWriter {
- public:
-  bool open(const std::string& path) {
-    output_.open(path, std::ios::binary);
-    if (!output_) {
-      return false;
-    }
-
-    write_header(0);
-    path_ = path;
-    return output_.good();
-  }
-
-  void write_frame(const MonoAudioFrame& frame) {
-    if (!output_) {
-      return;
-    }
-
-    const auto bytes = static_cast<std::streamsize>(udp_audio::audio::kFramePayloadBytes);
-    output_.write(reinterpret_cast<const char*>(frame.samples.data()), bytes);
-    data_bytes_ += udp_audio::audio::kFramePayloadBytes;
-    ++recorded_frames_;
-  }
-
-  void close() {
-    if (!output_) {
-      return;
-    }
-
-    output_.seekp(0, std::ios::beg);
-    write_header(data_bytes_);
-    output_.close();
-  }
-
-  [[nodiscard]] std::uint64_t recorded_frames() const noexcept {
-    return recorded_frames_;
-  }
-
-  [[nodiscard]] std::uint64_t data_bytes() const noexcept {
-    return data_bytes_;
-  }
-
- private:
-  void write_u16(std::uint16_t value) {
-    const char bytes[] = {
-      static_cast<char>(value & 0xffU),
-      static_cast<char>((value >> 8U) & 0xffU),
-    };
-    output_.write(bytes, sizeof(bytes));
-  }
-
-  void write_u32(std::uint32_t value) {
-    const char bytes[] = {
-      static_cast<char>(value & 0xffU),
-      static_cast<char>((value >> 8U) & 0xffU),
-      static_cast<char>((value >> 16U) & 0xffU),
-      static_cast<char>((value >> 24U) & 0xffU),
-    };
-    output_.write(bytes, sizeof(bytes));
-  }
-
-  void write_header(std::uint64_t data_bytes) {
-    constexpr std::uint16_t kAudioFormatIeeeFloat = 3;
-    constexpr std::uint16_t kBitsPerSample = 32;
-    constexpr std::uint16_t kBlockAlign =
-      static_cast<std::uint16_t>(udp_audio::audio::kChannels * sizeof(float));
-    constexpr std::uint32_t kByteRate = udp_audio::audio::kSampleRateHz * kBlockAlign;
-
-    const auto clamped_data_bytes =
-      static_cast<std::uint32_t>(std::min<std::uint64_t>(data_bytes, 0xfffffff0ULL));
-
-    output_.write("RIFF", 4);
-    write_u32(36U + clamped_data_bytes);
-    output_.write("WAVE", 4);
-
-    output_.write("fmt ", 4);
-    write_u32(16);
-    write_u16(kAudioFormatIeeeFloat);
-    write_u16(static_cast<std::uint16_t>(udp_audio::audio::kChannels));
-    write_u32(udp_audio::audio::kSampleRateHz);
-    write_u32(kByteRate);
-    write_u16(kBlockAlign);
-    write_u16(kBitsPerSample);
-
-    output_.write("data", 4);
-    write_u32(clamped_data_bytes);
-  }
-
-  std::ofstream output_{};
-  std::string path_{};
-  std::uint64_t data_bytes_ = 0;
-  std::uint64_t recorded_frames_ = 0;
 };
 
 template <typename T>
@@ -316,95 +204,27 @@ udp_audio::audio::SourceMode parse_source_mode(std::string_view value) {
   return udp_audio::audio::SourceMode::sine;
 }
 
-void append_u8(std::vector<std::byte>& out, std::uint8_t value) {
-  out.push_back(static_cast<std::byte>(value));
-}
-
-void append_u16(std::vector<std::byte>& out, std::uint16_t value) {
-  out.push_back(static_cast<std::byte>((value >> 8U) & 0xffU));
-  out.push_back(static_cast<std::byte>(value & 0xffU));
-}
-
-void append_u32(std::vector<std::byte>& out, std::uint32_t value) {
-  out.push_back(static_cast<std::byte>((value >> 24U) & 0xffU));
-  out.push_back(static_cast<std::byte>((value >> 16U) & 0xffU));
-  out.push_back(static_cast<std::byte>((value >> 8U) & 0xffU));
-  out.push_back(static_cast<std::byte>(value & 0xffU));
-}
-
-std::uint16_t read_u16(std::span<const std::byte> bytes, std::size_t offset) {
-  return static_cast<std::uint16_t>(
-    (static_cast<std::uint16_t>(bytes[offset]) << 8U) |
-    static_cast<std::uint16_t>(bytes[offset + 1U]));
-}
-
-std::uint32_t read_u32(std::span<const std::byte> bytes, std::size_t offset) {
-  return (static_cast<std::uint32_t>(bytes[offset]) << 24U) |
-         (static_cast<std::uint32_t>(bytes[offset + 1U]) << 16U) |
-         (static_cast<std::uint32_t>(bytes[offset + 2U]) << 8U) |
-         static_cast<std::uint32_t>(bytes[offset + 3U]);
-}
-
 std::vector<std::byte> make_packet(const EncodedPacket& encoded,
-                                   const std::deque<EncodedPacket>& redundancy_history,
+                                   std::span<const EncodedPacket> redundancy_history,
                                    std::size_t redundancy_frames,
                                    LoopbackStats& stats) {
   using udp_audio::protocol::PacketHeader;
 
-  constexpr std::uint8_t kBundleMagic = 0x4f;  // "O"
-  constexpr std::uint8_t kBundleVersion = 1;
+  const auto bundle =
+    udp_audio::codec::serialize_opus_bundle(encoded, redundancy_history, redundancy_frames);
+  stats.redundancy_bytes += bundle.redundancy_bytes;
 
-  std::size_t repair_count = 0;
-  std::size_t projected_payload_size = 6U + encoded.payload_size;
-  const auto requested_repair_count =
-    std::min<std::size_t>(redundancy_frames, redundancy_history.size());
-  for (std::size_t i = 0; i < requested_repair_count; ++i) {
-    const auto& repair = redundancy_history[redundancy_history.size() - 1U - i];
-    const auto next_size = projected_payload_size + 10U + repair.payload_size;
-    if (next_size > udp_audio::protocol::kMaxPayloadBytes) {
-      break;
-    }
-    projected_payload_size = next_size;
-    ++repair_count;
-  }
-  std::vector<std::byte> payload;
-  payload.reserve(projected_payload_size);
-
-  append_u8(payload, kBundleMagic);
-  append_u8(payload, kBundleVersion);
-  append_u8(payload, static_cast<std::uint8_t>(repair_count));
-  append_u8(payload, 0);
-  append_u16(payload, static_cast<std::uint16_t>(encoded.payload_size));
-
-  for (std::size_t i = 0; i < repair_count; ++i) {
-    const auto& repair = redundancy_history[redundancy_history.size() - 1U - i];
-    append_u32(payload, repair.sequence);
-    append_u32(payload, repair.timestamp_samples);
-    append_u16(payload, static_cast<std::uint16_t>(repair.payload_size));
-    stats.redundancy_bytes += repair.payload_size;
-  }
-
-  const auto append_packet_payload = [&payload](const EncodedPacket& packet) {
-    const auto* begin = reinterpret_cast<const std::byte*>(packet.payload.data());
-    payload.insert(payload.end(), begin, begin + packet.payload_size);
-  };
-
-  append_packet_payload(encoded);
-  for (std::size_t i = 0; i < repair_count; ++i) {
-    append_packet_payload(redundancy_history[redundancy_history.size() - 1U - i]);
-  }
-
-  std::vector<std::byte> packet(udp_audio::protocol::kHeaderSizeBytes + payload.size());
+  std::vector<std::byte> packet(udp_audio::protocol::kHeaderSizeBytes + bundle.payload.size());
 
   const PacketHeader header{
     .sequence = encoded.sequence,
     .timestamp_samples = encoded.timestamp_samples,
-    .payload_size = static_cast<std::uint16_t>(payload.size()),
+    .payload_size = static_cast<std::uint16_t>(bundle.payload.size()),
   };
 
   const auto header_bytes = udp_audio::protocol::serialize_header(header);
   std::memcpy(packet.data(), header_bytes.data(), header_bytes.size());
-  std::memcpy(packet.data() + header_bytes.size(), payload.data(), payload.size());
+  std::memcpy(packet.data() + header_bytes.size(), bundle.payload.data(), bundle.payload.size());
 
   return packet;
 }
@@ -486,34 +306,7 @@ void playback_callback(ma_device* device, void* output, const void* input, ma_ui
 
   auto* state = static_cast<PlaybackState*>(device->pUserData);
   auto* out = static_cast<float*>(output);
-  ma_uint32 written = 0;
-
-  while (written < frame_count) {
-    if (state->current_offset >= udp_audio::audio::kFrameSamples) {
-      auto next_frame = state->queue.pop();
-      if (!next_frame.has_value()) {
-        const auto remaining = static_cast<std::size_t>(frame_count - written);
-        std::fill(out + written, out + written + remaining, 0.0F);
-        state->stats.callback_underruns.fetch_add(1, std::memory_order_relaxed);
-        state->stats.rendered_device_frames.fetch_add(remaining, std::memory_order_relaxed);
-        return;
-      }
-
-      state->current_frame = *next_frame;
-      state->current_offset = 0;
-    }
-
-    const auto available_in_frame = udp_audio::audio::kFrameSamples - state->current_offset;
-    const auto remaining_output = static_cast<std::size_t>(frame_count - written);
-    const auto samples_to_copy = std::min(available_in_frame, remaining_output);
-    const auto* source = state->current_frame.samples.data() + state->current_offset;
-
-    std::copy(source, source + samples_to_copy, out + written);
-
-    written += static_cast<ma_uint32>(samples_to_copy);
-    state->current_offset += samples_to_copy;
-    state->stats.rendered_device_frames.fetch_add(samples_to_copy, std::memory_order_relaxed);
-  }
+  state->render(out, frame_count);
 }
 
 void enqueue_for_playback(const MonoAudioFrame& frame, PlaybackState* playback_state) {
@@ -521,11 +314,7 @@ void enqueue_for_playback(const MonoAudioFrame& frame, PlaybackState* playback_s
     return;
   }
 
-  if (playback_state->queue.push(frame)) {
-    playback_state->stats.enqueued_output_frames.fetch_add(1, std::memory_order_relaxed);
-  } else {
-    playback_state->stats.dropped_output_frames.fetch_add(1, std::memory_order_relaxed);
-  }
+  playback_state->enqueue_output(frame);
 }
 
 void enqueue_fadeout_frame(float last_sample, PlaybackState* playback_state) {
@@ -540,11 +329,7 @@ void enqueue_fadeout_frame(float last_sample, PlaybackState* playback_state) {
     fadeout_frame.samples[i] = last_sample * fade;
   }
 
-  if (playback_state->queue.push(fadeout_frame)) {
-    playback_state->stats.fadeout_frames.fetch_add(1, std::memory_order_relaxed);
-  } else {
-    playback_state->stats.dropped_output_frames.fetch_add(1, std::memory_order_relaxed);
-  }
+  playback_state->enqueue_fadeout(fadeout_frame);
 }
 
 std::optional<BufferedPacket> make_buffered_packet(const udp_audio::protocol::PacketHeader& header,
@@ -552,31 +337,9 @@ std::optional<BufferedPacket> make_buffered_packet(const udp_audio::protocol::Pa
                                                    Clock::time_point arrival_time,
                                                    const std::vector<Clock::time_point>& sent_times,
                                                    LoopbackStats& stats) {
-  constexpr std::uint8_t kBundleMagic = 0x4f;
-  constexpr std::uint8_t kBundleVersion = 1;
-  constexpr std::size_t kBundleHeaderBytes = 6;
-  constexpr std::size_t kRepairDescriptorBytes = 10;
-
-  if (payload.size() < kBundleHeaderBytes ||
-      static_cast<std::uint8_t>(payload[0]) != kBundleMagic ||
-      static_cast<std::uint8_t>(payload[1]) != kBundleVersion) {
-    return std::nullopt;
-  }
-
-  const auto repair_count = static_cast<std::size_t>(payload[2]);
-  if (repair_count > kMaxRedundantOpusFrames) {
-    return std::nullopt;
-  }
-
-  const auto descriptor_bytes = repair_count * kRepairDescriptorBytes;
-  const auto payload_header_bytes = kBundleHeaderBytes + descriptor_bytes;
-  if (payload.size() < payload_header_bytes) {
-    return std::nullopt;
-  }
-
-  const auto primary_size = static_cast<std::size_t>(read_u16(payload, 4));
-  if (primary_size == 0 || primary_size > kMaxOpusPacketBytes ||
-      payload.size() < payload_header_bytes + primary_size) {
+  const auto bundle =
+    udp_audio::codec::parse_opus_bundle(payload, header.sequence, header.timestamp_samples);
+  if (!bundle.has_value()) {
     return std::nullopt;
   }
 
@@ -603,30 +366,12 @@ std::optional<BufferedPacket> make_buffered_packet(const udp_audio::protocol::Pa
   ++stats.received;
 
   BufferedPacket buffered{};
-  buffered.packet.sequence = header.sequence;
-  buffered.packet.timestamp_samples = header.timestamp_samples;
-  buffered.packet.payload_size = primary_size;
+  buffered.packet = bundle->primary;
   buffered.arrival_time = arrival_time;
   buffered.network_latency_ms = latency_ms;
   buffered.inter_arrival_ms = inter_arrival_ms;
-  std::memcpy(buffered.packet.payload.data(), payload.data() + payload_header_bytes,
-              primary_size);
-
-  auto blob_offset = payload_header_bytes + primary_size;
-  for (std::size_t i = 0; i < repair_count; ++i) {
-    const auto descriptor_offset = kBundleHeaderBytes + (i * kRepairDescriptorBytes);
-    auto& repair = buffered.redundant_packets[i];
-    repair.sequence = read_u32(payload, descriptor_offset);
-    repair.timestamp_samples = read_u32(payload, descriptor_offset + 4U);
-    repair.payload_size = read_u16(payload, descriptor_offset + 8U);
-    if (repair.payload_size == 0 || repair.payload_size > kMaxOpusPacketBytes ||
-        payload.size() < blob_offset + repair.payload_size) {
-      return std::nullopt;
-    }
-    std::memcpy(repair.payload.data(), payload.data() + blob_offset, repair.payload_size);
-    blob_offset += repair.payload_size;
-    ++buffered.redundant_packet_count;
-  }
+  buffered.redundant_packets = bundle->redundant_packets;
+  buffered.redundant_packet_count = bundle->redundant_packet_count;
 
   return buffered;
 }
@@ -929,12 +674,7 @@ int main(int argc, char** argv) {
   bool playback_started = false;
 
   if (options.play_audio) {
-    const auto preroll_frame = udp_audio::audio::make_silent_frame(0);
-    for (std::size_t i = 0; i < kPlaybackPrerollFrames; ++i) {
-      if (playback_state.queue.push(preroll_frame)) {
-        playback_state.stats.preroll_frames.fetch_add(1, std::memory_order_relaxed);
-      }
-    }
+    playback_state.enqueue_preroll(kPlaybackPrerollFrames);
 
     auto config = ma_device_config_init(ma_device_type_playback);
     config.playback.format = ma_format_f32;
@@ -980,7 +720,7 @@ int main(int argc, char** argv) {
   LoopbackStats stats{};
   std::vector<Clock::time_point> sent_times(frame_count);
   std::deque<PendingPacket> pending_packets;
-  std::deque<EncodedPacket> redundancy_history;
+  std::vector<EncodedPacket> redundancy_history;
   std::mt19937 rng(options.seed);
   udp_audio::audio::SourceState source_state{};
   const auto stream_start = Clock::now();
@@ -1003,11 +743,12 @@ int main(int argc, char** argv) {
     }
 
     sent_times[i] = Clock::now();
-    schedule_packet(make_packet(encoded, redundancy_history, options.redundancy_frames, stats),
+    schedule_packet(make_packet(encoded, std::span<const EncodedPacket>(redundancy_history),
+                                options.redundancy_frames, stats),
                     options, rng, pending_packets, stats);
     redundancy_history.push_back(encoded);
     while (redundancy_history.size() > options.redundancy_frames) {
-      redundancy_history.pop_front();
+      redundancy_history.erase(redundancy_history.begin());
     }
 
     if (!release_due_packets(pending_packets, sender, receiver_endpoint, stats, error)) {
@@ -1101,7 +842,7 @@ int main(int argc, char** argv) {
       Clock::now() + std::chrono::milliseconds(
                        250 + 10 * static_cast<int>(options.jitter_depth_frames));
     while (Clock::now() < playback_deadline &&
-           playback_state.stats.rendered_device_frames.load(std::memory_order_relaxed) <
+           playback_state.stats().rendered_device_frames.load(std::memory_order_relaxed) <
              expected_device_frames) {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
@@ -1188,19 +929,20 @@ int main(int argc, char** argv) {
   }
   if (options.play_audio) {
     std::cout << "audio_preroll_frames="
-              << playback_state.stats.preroll_frames.load(std::memory_order_relaxed) << '\n';
+              << playback_state.stats().preroll_frames.load(std::memory_order_relaxed) << '\n';
     std::cout << "audio_fadeout_frames="
-              << playback_state.stats.fadeout_frames.load(std::memory_order_relaxed) << '\n';
+              << playback_state.stats().fadeout_frames.load(std::memory_order_relaxed) << '\n';
     std::cout << "audio_enqueued_output_frames="
-              << playback_state.stats.enqueued_output_frames.load(std::memory_order_relaxed)
+              << playback_state.stats().enqueued_output_frames.load(std::memory_order_relaxed)
               << '\n';
     std::cout << "audio_rendered_device_frames="
-              << playback_state.stats.rendered_device_frames.load(std::memory_order_relaxed)
+              << playback_state.stats().rendered_device_frames.load(std::memory_order_relaxed)
               << '\n';
     std::cout << "audio_callback_underruns="
-              << playback_state.stats.callback_underruns.load(std::memory_order_relaxed) << '\n';
+              << playback_state.stats().callback_underruns.load(std::memory_order_relaxed)
+              << '\n';
     std::cout << "audio_dropped_output_frames="
-              << playback_state.stats.dropped_output_frames.load(std::memory_order_relaxed)
+              << playback_state.stats().dropped_output_frames.load(std::memory_order_relaxed)
               << '\n';
   }
 }

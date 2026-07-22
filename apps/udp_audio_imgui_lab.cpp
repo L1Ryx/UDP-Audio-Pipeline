@@ -272,13 +272,13 @@ int main(int argc, char** argv) {
 
         ImGui::TextUnformatted("Controls");
         ImGui::Separator();
-        if (ImGui::Button("Robust Chirp Preset", ImVec2(-1.0F, 0))) {
+        if (ImGui::Button("Real Bundle Chirp Preset", ImVec2(-1.0F, 0))) {
           settings.frame_count = 100;
           settings.loss_percent = 20;
           settings.jitter_ms = 25;
           settings.seed = 1337;
           settings.bitrate_bps = 64000;
-          settings.redundancy_frames = 5;
+          settings.redundancy_frames = 3;
           settings.jitter_depth_frames = 6;
           settings.source_mode = SourceMode::chirp;
           settings.recovery_mode = RecoveryMode::fec;

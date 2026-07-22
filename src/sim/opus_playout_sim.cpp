@@ -3,27 +3,24 @@
 #include <opus/opus.h>
 
 #include <algorithm>
-#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <optional>
 #include <random>
+#include <span>
 
 namespace udp_audio::sim {
 namespace {
 
 using Clock = std::chrono::steady_clock;
 
-constexpr std::size_t kMaxOpusPacketBytes = 1500;
 constexpr std::size_t kMaxPlotSamples = 2400;
 constexpr std::size_t kFrameSamples = audio::kFrameSamples;
 constexpr std::size_t kSampleRateHz = audio::kSampleRateHz;
 constexpr std::size_t kFrameDurationMs = audio::kFrameDurationMs;
 
-struct EncodedFrame {
-  std::array<unsigned char, kMaxOpusPacketBytes> payload{};
-  std::size_t payload_size = 0;
-};
+using EncodedFrame = codec::EncodedOpusPacket;
 
 bool encode_frames(const OpusSimulationSettings& settings,
                    std::vector<EncodedFrame>& encoded_frames,
@@ -61,6 +58,8 @@ bool encode_frames(const OpusSimulationSettings& settings,
       return false;
     }
     encoded.payload_size = static_cast<std::size_t>(byte_count);
+    encoded.sequence = static_cast<std::uint32_t>(i);
+    encoded.timestamp_samples = frame.timestamp_samples;
     result.avg_packet_bytes += static_cast<double>(encoded.payload_size);
   }
 
@@ -121,6 +120,19 @@ void decode_plc(OpusDecoder* decoder,
   }
 }
 
+std::optional<codec::OpusPacketBundle> make_bundle(
+  const EncodedFrame& encoded,
+  std::span<const EncodedFrame> redundancy_history,
+  int redundancy_frames,
+  OpusSimulationResult& result) {
+  const auto serialized = codec::serialize_opus_bundle(
+    encoded, redundancy_history,
+    static_cast<std::size_t>(std::max(0, redundancy_frames)));
+  result.avg_redundancy_bytes += static_cast<double>(serialized.redundancy_bytes);
+  return codec::parse_opus_bundle(serialized.payload, encoded.sequence,
+                                  encoded.timestamp_samples);
+}
+
 }  // namespace
 
 OpusSimulationResult run_opus_playout_simulation(const OpusSimulationSettings& settings) {
@@ -128,14 +140,33 @@ OpusSimulationResult run_opus_playout_simulation(const OpusSimulationSettings& s
   OpusSimulationResult result{};
   result.generated = settings.frame_count;
 
-  const int repair_tail_frames =
+  const int effective_redundancy_frames =
     std::clamp(settings.redundancy_frames, 0, kMaxOpusRedundancyFrames);
-  const int encoded_frame_count = settings.frame_count + repair_tail_frames;
+  const int encoded_frame_count = settings.frame_count;
 
   std::vector<EncodedFrame> encoded_frames;
   if (!encode_frames(settings, encoded_frames, encoded_frame_count, result)) {
     return result;
   }
+
+  std::vector<codec::OpusPacketBundle> bundles;
+  bundles.reserve(static_cast<std::size_t>(encoded_frame_count));
+  std::vector<EncodedFrame> redundancy_history;
+  for (const auto& encoded : encoded_frames) {
+    const auto bundle = make_bundle(encoded, std::span<const EncodedFrame>(redundancy_history),
+                                    effective_redundancy_frames, result);
+    if (!bundle.has_value()) {
+      result.error = "Opus bundle parse failed";
+      return result;
+    }
+    bundles.push_back(*bundle);
+    redundancy_history.push_back(encoded);
+    while (redundancy_history.size() >
+           static_cast<std::size_t>(effective_redundancy_frames)) {
+      redundancy_history.erase(redundancy_history.begin());
+    }
+  }
+  result.avg_redundancy_bytes /= std::max(1, encoded_frame_count);
 
   std::mt19937 rng(static_cast<std::uint32_t>(settings.seed));
   std::uniform_int_distribution<int> loss_distribution(1, 100);
@@ -184,26 +215,35 @@ OpusSimulationResult run_opus_playout_simulation(const OpusSimulationSettings& s
     const bool primary_available =
       !dropped[seq_index] && arrival_ms[seq_index] <= playout_ms;
     if (primary_available) {
-      decode_packet(decoder, encoded_frames[seq_index], output, result);
+      decode_packet(decoder, bundles[seq_index].primary, output, result);
       report.status = OpusFrameStatus::decoded;
       report.network_latency_ms =
         arrival_ms[seq_index] - static_cast<double>(sequence * static_cast<int>(kFrameDurationMs));
       ++result.decoded;
     } else {
       bool recovered = false;
-      for (int lookahead = 1; lookahead <= settings.redundancy_frames; ++lookahead) {
+      for (int lookahead = 1; lookahead <= effective_redundancy_frames; ++lookahead) {
         const int carrier = sequence + lookahead;
         if (carrier >= encoded_frame_count) {
           break;
         }
         const auto carrier_index = static_cast<std::size_t>(carrier);
         if (!dropped[carrier_index] && arrival_ms[carrier_index] <= playout_ms) {
-          decode_packet(decoder, encoded_frames[seq_index], output, result);
-          report.status = OpusFrameStatus::redundant;
-          ++result.decoded;
-          ++result.redundant;
-          recovered = true;
-          break;
+          const auto& carrier_bundle = bundles[carrier_index];
+          for (std::size_t i = 0; i < carrier_bundle.redundant_packet_count; ++i) {
+            if (carrier_bundle.redundant_packets[i].sequence ==
+                static_cast<std::uint32_t>(sequence)) {
+              decode_packet(decoder, carrier_bundle.redundant_packets[i], output, result);
+              report.status = OpusFrameStatus::redundant;
+              ++result.decoded;
+              ++result.redundant;
+              recovered = true;
+              break;
+            }
+          }
+          if (recovered) {
+            break;
+          }
         }
       }
 
@@ -211,7 +251,7 @@ OpusSimulationResult run_opus_playout_simulation(const OpusSimulationSettings& s
           sequence + 1 < encoded_frame_count) {
         const auto carrier_index = static_cast<std::size_t>(sequence + 1);
         if (!dropped[carrier_index] && arrival_ms[carrier_index] <= playout_ms) {
-          decode_fec_attempt(decoder, encoded_frames[carrier_index], output, result);
+          decode_fec_attempt(decoder, bundles[carrier_index].primary, output, result);
           report.status = OpusFrameStatus::fec_attempt;
           ++result.fec_attempts;
           recovered = true;
@@ -242,8 +282,6 @@ OpusSimulationResult run_opus_playout_simulation(const OpusSimulationSettings& s
 
   result.avg_latency_ms /= std::max(1, result.decoded);
   result.avg_playout_ms /= std::max(1, settings.frame_count);
-  result.avg_redundancy_bytes =
-    result.avg_packet_bytes * static_cast<double>(settings.redundancy_frames);
 
   const auto stride =
     std::max<std::size_t>(1U, result.samples.size() / kMaxPlotSamples);

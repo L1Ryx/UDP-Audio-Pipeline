@@ -1,6 +1,7 @@
 #pragma once
 
 #include "udp_audio/audio/source.hpp"
+#include "udp_audio/codec/opus_packet.hpp"
 
 #include <cstdint>
 #include <string>
@@ -26,7 +27,7 @@ struct OpusSimulationSettings {
   int jitter_ms = 25;
   int seed = 1337;
   int bitrate_bps = 64000;
-  int redundancy_frames = 5;
+  int redundancy_frames = 3;
   int jitter_depth_frames = 6;
   audio::SourceMode source_mode = audio::SourceMode::chirp;
   OpusRecoveryMode recovery_mode = OpusRecoveryMode::fec;
@@ -63,7 +64,8 @@ struct OpusSimulationResult {
   double avg_redundancy_bytes = 0.0;
 };
 
-inline constexpr int kMaxOpusRedundancyFrames = 8;
+inline constexpr int kMaxOpusRedundancyFrames =
+  static_cast<int>(codec::kMaxRedundantOpusFrames);
 
 OpusSimulationResult run_opus_playout_simulation(const OpusSimulationSettings& settings);
 

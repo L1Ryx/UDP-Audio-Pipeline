@@ -1,7 +1,7 @@
 # Low-Latency UDP Audio Pipeline
 
 A C++20 audio streaming engine built around custom UDP packets, jitter buffering,
-packet loss concealment, and AVX2 DSP.
+packet loss concealment, and SIMD DSP.
 
 The first target is simple and measurable: send 48 kHz float PCM across a LAN or local
 loopback with clear telemetry for latency, jitter, packet loss, and DSP cost.
@@ -26,7 +26,7 @@ ctest --preset debug
 - Opus encode/decode loopback baseline using decoder-side PLC.
 - miniaudio playback demo using a real audio callback.
 - Lock-free SPSC queue.
-- Starter jitter buffer, PLC, scalar DSP, and AVX2 DSP paths.
+- Starter jitter buffer, PLC, scalar DSP, NEON DSP, and AVX2 DSP paths.
 
 ## Run The Loopback Demo
 
