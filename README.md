@@ -92,7 +92,7 @@ Jitter buffer modes:
 If `libopus` is installed, CMake builds an Opus loopback target:
 
 ```sh
-./build/debug/udp_audio_opus_loopback [frames] [loss_percent] [jitter_ms] [seed] [record_wav] [source_mode] [bitrate_bps]
+./build/debug/udp_audio_opus_loopback [frames] [loss_percent] [jitter_ms] [seed] [record_wav] [source_mode] [bitrate_bps] [recovery_mode] [play_audio] [redundancy_frames] [jitter_depth_frames]
 ```
 
 Example:
@@ -110,9 +110,22 @@ Add `fec` as the final argument to enable Opus in-band forward error correction:
 ./build/debug/udp_audio_opus_loopback 100 20 25 1337 recordings/chirp_opus_fec.wav chirp 64000 fec
 ```
 
-FEC can recover some missing frames from repair data in the following packet. Recovered
-frames are counted as `opus_fec_frames`; any frame that cannot be recovered falls back
-to `opus_plc_frames`.
+The Opus loopback defaults to a playback-safe profile: 5-frame jitter depth and 3
+redundant Opus repair frames per packet. Redundancy is counted as
+`redundancy_recovered`; any frame that cannot be recovered falls back to Opus FEC or
+Opus PLC.
+
+Set `play_audio` to `1` to listen to the decoded Opus playout stream live:
+
+```sh
+./build/debug/udp_audio_opus_loopback 100 20 25 1337 recordings/chirp_opus_fec.wav chirp 64000 fec 1
+```
+
+Disable redundancy or force the old 3-frame depth for comparison:
+
+```sh
+./build/debug/udp_audio_opus_loopback 100 20 25 1337 recordings/chirp_opus_tight.wav chirp 64000 fec 0 0 3
+```
 
 ## Run The Playback Demo
 

@@ -80,7 +80,7 @@ if(UDP_AUDIO_ENABLE_OPUS)
       INTERFACE_INCLUDE_DIRECTORIES "${OPUS_INCLUDE_DIR}")
 
     add_executable(udp_audio_opus_loopback apps/udp_audio_opus_loopback.cpp)
-    target_link_libraries(udp_audio_opus_loopback PRIVATE udp_audio_core Opus::opus)
+    target_link_libraries(udp_audio_opus_loopback PRIVATE udp_audio_core miniaudio Opus::opus)
     udp_audio_enable_warnings(udp_audio_opus_loopback)
   else()
     message(STATUS "libopus not found; udp_audio_opus_loopback will not be built")
