@@ -72,6 +72,9 @@ if(UDP_AUDIO_ENABLE_OPUS)
   find_library(OPUS_LIBRARY
     NAMES opus
     HINTS /opt/homebrew/lib /usr/local/lib)
+  find_package(SDL3 CONFIG QUIET
+    PATHS /opt/homebrew/lib/cmake/SDL3 /usr/local/lib/cmake/SDL3)
+  find_package(OpenGL QUIET)
 
   if(OPUS_INCLUDE_DIR AND OPUS_LIBRARY)
     add_library(Opus::opus UNKNOWN IMPORTED)
@@ -82,6 +85,35 @@ if(UDP_AUDIO_ENABLE_OPUS)
     add_executable(udp_audio_opus_loopback apps/udp_audio_opus_loopback.cpp)
     target_link_libraries(udp_audio_opus_loopback PRIVATE udp_audio_core miniaudio Opus::opus)
     udp_audio_enable_warnings(udp_audio_opus_loopback)
+
+    if(SDL3_FOUND AND OpenGL_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/imgui/imgui.cpp")
+      add_library(imgui_sdl3_opengl STATIC
+        external/imgui/imgui.cpp
+        external/imgui/imgui_demo.cpp
+        external/imgui/imgui_draw.cpp
+        external/imgui/imgui_tables.cpp
+        external/imgui/imgui_widgets.cpp
+        external/imgui/backends/imgui_impl_sdl3.cpp
+        external/imgui/backends/imgui_impl_opengl3.cpp)
+      target_include_directories(imgui_sdl3_opengl
+        SYSTEM
+        PUBLIC
+          external/imgui
+          external/imgui/backends)
+      target_link_libraries(imgui_sdl3_opengl PUBLIC SDL3::SDL3 OpenGL::GL)
+      target_compile_features(imgui_sdl3_opengl PUBLIC cxx_std_20)
+
+      add_executable(udp_audio_imgui_lab apps/udp_audio_imgui_lab.cpp)
+      target_link_libraries(udp_audio_imgui_lab
+        PRIVATE
+          udp_audio_core
+          miniaudio
+          Opus::opus
+          imgui_sdl3_opengl)
+      udp_audio_enable_warnings(udp_audio_imgui_lab)
+    else()
+      message(STATUS "SDL3/OpenGL/ImGui not found; udp_audio_imgui_lab will not be built")
+    endif()
   else()
     message(STATUS "libopus not found; udp_audio_opus_loopback will not be built")
   endif()

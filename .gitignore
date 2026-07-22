@@ -44,6 +44,7 @@ Desktop.ini
 
 # Logs and runtime traces
 *.log
+imgui.ini
 logs/
 telemetry/
 captures/
@@ -74,4 +75,3 @@ __pycache__/
 .env
 .env.*
 !.env.example
-

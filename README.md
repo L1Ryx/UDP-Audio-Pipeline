@@ -134,3 +134,15 @@ Disable redundancy or force the old 3-frame depth for comparison:
 ```
 
 This plays a short 440 Hz tone through the default output device.
+
+## Run The ImGui Lab
+
+If SDL3, OpenGL, Opus, and Dear ImGui are available, CMake builds an interactive test
+bench:
+
+```sh
+./build/debug/udp_audio_imgui_lab
+```
+
+Use it to run repeatable Opus loss/jitter scenarios, play the decoded output, and view
+waveform, frame energy, recovery status, and profiling counters.
