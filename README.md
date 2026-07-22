@@ -37,7 +37,7 @@ ctest --preset debug
 Optional arguments:
 
 ```sh
-./build/debug/udp_audio_loopback [frames] [loss_percent] [jitter_ms] [seed] [play_audio] [record_wav] [plc_mode] [source_mode]
+./build/debug/udp_audio_loopback [frames] [loss_percent] [jitter_ms] [seed] [play_audio] [record_wav] [plc_mode] [source_mode] [jitter_buffer_mode]
 ```
 
 Example with deterministic impairment:
@@ -76,6 +76,15 @@ Source modes:
 
 ```sh
 ./build/debug/udp_audio_loopback 100 20 25 1337 1 recordings/chirp_periodic_interp.wav periodic_interp chirp
+```
+
+Jitter buffer modes:
+
+- `fixed`: fixed 3-frame playout depth.
+- `adaptive`: increases playout depth when packet timing gets bursty.
+
+```sh
+./build/debug/udp_audio_loopback 80 0 45 1337 0 recordings/jitter_adaptive_45ms.wav periodic_interp chirp adaptive
 ```
 
 ## Run The Opus Baseline

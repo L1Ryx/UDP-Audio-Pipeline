@@ -1,6 +1,7 @@
 #include "udp_audio/audio/frame.hpp"
 #include "udp_audio/concurrency/spsc_ring_buffer.hpp"
 #include "udp_audio/dsp/plc.hpp"
+#include "udp_audio/jitter/adaptive_jitter_buffer.hpp"
 #include "udp_audio/jitter/fixed_jitter_buffer.hpp"
 #include "udp_audio/protocol/packet.hpp"
 #include "udp_audio/transport/udp_socket.hpp"
@@ -40,6 +41,7 @@ constexpr double kChirpEndHz = 880.0;
 constexpr float kToneGain = 0.2F;
 constexpr std::size_t kDefaultFrameCount = 100;
 constexpr std::size_t kJitterDepthFrames = 3;
+constexpr std::size_t kAdaptiveMaxJitterDepthFrames = 8;
 constexpr std::size_t kJitterCapacityFrames = 64;
 constexpr std::size_t kPlaybackQueueCapacityFrames = 256;
 constexpr std::size_t kPlaybackPrerollFrames = 4;
@@ -58,6 +60,7 @@ struct ProgramOptions {
   std::string record_wav_path{};
   std::string plc_mode = "periodic_interp";
   std::string source_mode = "sine";
+  std::string jitter_buffer_mode = "fixed";
 };
 
 enum class PlcMode {
@@ -88,11 +91,23 @@ enum class SourceMode {
   chirp,
 };
 
+enum class JitterBufferMode {
+  fixed,
+  adaptive,
+};
+
 SourceMode parse_source_mode(std::string_view value) {
   if (value == "chirp") {
     return SourceMode::chirp;
   }
   return SourceMode::sine;
+}
+
+JitterBufferMode parse_jitter_buffer_mode(std::string_view value) {
+  if (value == "adaptive") {
+    return JitterBufferMode::adaptive;
+  }
+  return JitterBufferMode::fixed;
 }
 
 struct PlaybackStats {
@@ -133,6 +148,7 @@ struct LoopbackStats {
   std::size_t concealed = 0;
   std::size_t datagrams = 0;
   std::size_t invalid_datagrams = 0;
+  std::size_t late_datagrams = 0;
   std::uint32_t previous_sequence = 0;
   bool has_previous_sequence = false;
   bool has_previous_arrival = false;
@@ -144,6 +160,10 @@ struct LoopbackStats {
   double playout_latency_max_ms = 0.0;
   double inter_arrival_sum_ms = 0.0;
   double inter_arrival_max_ms = 0.0;
+  std::size_t target_depth_min_frames = std::numeric_limits<std::size_t>::max();
+  std::size_t target_depth_max_frames = 0;
+  double target_depth_sum_frames = 0.0;
+  std::size_t target_depth_samples = 0;
 };
 
 struct PendingPacket {
@@ -260,32 +280,32 @@ ProgramOptions parse_options(int argc, char** argv) {
 
   if (argc > 1 && !parse_unsigned_arg(std::string_view(argv[1]), options.frame_count)) {
     std::cerr << "Usage: udp_audio_loopback [frame_count] [loss_percent] [jitter_ms] [seed] "
-                 "[play_audio] [record_wav] [plc_mode] [source_mode]\n";
+                 "[play_audio] [record_wav] [plc_mode] [source_mode] [jitter_buffer_mode]\n";
     options.frame_count = kDefaultFrameCount;
   }
 
   if (argc > 2 && !parse_unsigned_arg(std::string_view(argv[2]), options.loss_percent)) {
     std::cerr << "Usage: udp_audio_loopback [frame_count] [loss_percent] [jitter_ms] [seed] "
-                 "[play_audio] [record_wav] [plc_mode] [source_mode]\n";
+                 "[play_audio] [record_wav] [plc_mode] [source_mode] [jitter_buffer_mode]\n";
     options.loss_percent = 0;
   }
 
   if (argc > 3 && !parse_unsigned_arg(std::string_view(argv[3]), options.jitter_ms)) {
     std::cerr << "Usage: udp_audio_loopback [frame_count] [loss_percent] [jitter_ms] [seed] "
-                 "[play_audio] [record_wav] [plc_mode] [source_mode]\n";
+                 "[play_audio] [record_wav] [plc_mode] [source_mode] [jitter_buffer_mode]\n";
     options.jitter_ms = 0;
   }
 
   if (argc > 4 && !parse_unsigned_arg(std::string_view(argv[4]), options.seed)) {
     std::cerr << "Usage: udp_audio_loopback [frame_count] [loss_percent] [jitter_ms] [seed] "
-                 "[play_audio] [record_wav] [plc_mode] [source_mode]\n";
+                 "[play_audio] [record_wav] [plc_mode] [source_mode] [jitter_buffer_mode]\n";
     options.seed = 1337;
   }
 
   std::uint32_t play_audio = 0;
   if (argc > 5 && !parse_unsigned_arg(std::string_view(argv[5]), play_audio)) {
     std::cerr << "Usage: udp_audio_loopback [frame_count] [loss_percent] [jitter_ms] [seed] "
-                 "[play_audio] [record_wav] [plc_mode] [source_mode]\n";
+                 "[play_audio] [record_wav] [plc_mode] [source_mode] [jitter_buffer_mode]\n";
     play_audio = 0;
   }
 
@@ -312,6 +332,16 @@ ProgramOptions parse_options(int argc, char** argv) {
     } else {
       std::cerr << "Unknown source mode '" << mode << "'. Use sine or chirp.\n";
       options.source_mode = "sine";
+    }
+  }
+
+  if (argc > 9) {
+    const std::string_view mode(argv[9]);
+    if (mode == "fixed" || mode == "adaptive") {
+      options.jitter_buffer_mode = std::string(mode);
+    } else {
+      std::cerr << "Unknown jitter buffer mode '" << mode << "'. Use fixed or adaptive.\n";
+      options.jitter_buffer_mode = "fixed";
     }
   }
 
@@ -407,6 +437,7 @@ BufferedFrame make_buffered_frame(const udp_audio::protocol::PacketHeader& heade
                                   std::span<const std::byte> payload,
                                   Clock::time_point arrival_time,
                                   const std::vector<Clock::time_point>& sent_times,
+                                  udp_audio::jitter::AdaptiveJitterController* adaptive_controller,
                                   LoopbackStats& stats) {
   stats.previous_sequence = header.sequence;
   stats.has_previous_sequence = true;
@@ -417,6 +448,9 @@ BufferedFrame make_buffered_frame(const udp_audio::protocol::PacketHeader& heade
       std::chrono::duration<double, std::milli>(arrival_time - stats.previous_arrival).count();
     stats.inter_arrival_sum_ms += inter_arrival_ms;
     stats.inter_arrival_max_ms = std::max(stats.inter_arrival_max_ms, inter_arrival_ms);
+    if (adaptive_controller != nullptr) {
+      adaptive_controller->observe_inter_arrival(inter_arrival_ms);
+    }
   }
 
   stats.previous_arrival = arrival_time;
@@ -447,6 +481,8 @@ bool drain_receiver(udp_audio::transport::UdpSocket& receiver,
                     std::vector<Clock::time_point>& sent_times,
                     udp_audio::jitter::FixedJitterBuffer<BufferedFrame, kJitterCapacityFrames>&
                       jitter_buffer,
+                    std::uint32_t next_play_sequence,
+                    udp_audio::jitter::AdaptiveJitterController* adaptive_controller,
                     LoopbackStats& stats,
                     std::error_code& error) {
   std::array<std::byte, 2048> buffer{};
@@ -480,10 +516,15 @@ bool drain_receiver(udp_audio::transport::UdpSocket& receiver,
       continue;
     }
 
+    if (header.sequence < next_play_sequence) {
+      ++stats.late_datagrams;
+      continue;
+    }
+
     const auto payload = std::span<const std::byte>(
       buffer.data() + udp_audio::protocol::kHeaderSizeBytes, udp_audio::audio::kFramePayloadBytes);
     const auto buffered =
-      make_buffered_frame(header, payload, Clock::now(), sent_times, stats);
+      make_buffered_frame(header, payload, Clock::now(), sent_times, adaptive_controller, stats);
     static_cast<void>(jitter_buffer.push(header.sequence, buffered));
   }
 }
@@ -640,11 +681,21 @@ void synthesize_missing_frame(PlcMode mode,
                                     : udp_audio::dsp::PlcSynthesisMode::repeat_last_frame));
 }
 
+void record_target_depth(std::size_t target_depth_frames, LoopbackStats& stats) {
+  stats.target_depth_min_frames =
+    std::min(stats.target_depth_min_frames, target_depth_frames);
+  stats.target_depth_max_frames =
+    std::max(stats.target_depth_max_frames, target_depth_frames);
+  stats.target_depth_sum_frames += static_cast<double>(target_depth_frames);
+  ++stats.target_depth_samples;
+}
+
 void play_expected_frame(std::uint32_t sequence,
                          udp_audio::jitter::FixedJitterBuffer<BufferedFrame,
                                                                kJitterCapacityFrames>& jitter_buffer,
                          udp_audio::dsp::HoldAndDecayPlc<udp_audio::audio::kFrameSamples>& plc,
                          PlcMode plc_mode,
+                         std::size_t target_depth_frames,
                          BoundarySmoother& smoother,
                          PlaybackState* playback_state,
                          WavWriter* recorder,
@@ -675,7 +726,7 @@ void play_expected_frame(std::uint32_t sequence,
     enqueue_for_playback(concealed_frame, playback_state);
 
     std::cout << sequence << ',' << concealed_frame.timestamp_samples << ",,"
-              << playout_latency_ms << ",," << kJitterDepthFrames << ",concealed\n";
+              << playout_latency_ms << ",," << target_depth_frames << ",concealed\n";
     return;
   }
 
@@ -694,7 +745,7 @@ void play_expected_frame(std::uint32_t sequence,
 
   std::cout << sequence << ',' << frame->frame.timestamp_samples << ','
             << frame->network_latency_ms << ',' << playout_latency_ms << ','
-            << frame->inter_arrival_ms << ',' << kJitterDepthFrames << ",played\n";
+            << frame->inter_arrival_ms << ',' << target_depth_frames << ",played\n";
 }
 
 }  // namespace
@@ -731,8 +782,14 @@ int main(int argc, char** argv) {
   std::vector<Clock::time_point> sent_times(frame_count);
   const auto plc_mode = parse_plc_mode(options.plc_mode);
   const auto source_mode = parse_source_mode(options.source_mode);
+  const auto jitter_buffer_mode = parse_jitter_buffer_mode(options.jitter_buffer_mode);
   udp_audio::jitter::FixedJitterBuffer<BufferedFrame, kJitterCapacityFrames> jitter_buffer(
     kJitterDepthFrames);
+  udp_audio::jitter::AdaptiveJitterController adaptive_jitter_controller(
+    kJitterDepthFrames, kAdaptiveMaxJitterDepthFrames,
+    static_cast<double>(udp_audio::audio::kFrameDurationMs));
+  auto* adaptive_jitter =
+    jitter_buffer_mode == JitterBufferMode::adaptive ? &adaptive_jitter_controller : nullptr;
   udp_audio::dsp::HoldAndDecayPlc<udp_audio::audio::kFrameSamples> plc;
   BoundarySmoother boundary_smoother{};
   WavWriter recorder{};
@@ -791,6 +848,13 @@ int main(int argc, char** argv) {
   double phase = 0.0;
   const auto stream_start = Clock::now();
   auto next_send_time = stream_start;
+  std::uint32_t next_play_sequence = 0;
+
+  const auto current_target_depth = [&]() {
+    return jitter_buffer_mode == JitterBufferMode::adaptive
+             ? adaptive_jitter_controller.stats().target_depth_frames
+             : kJitterDepthFrames;
+  };
 
   std::cout << "sequence,timestamp_samples,network_latency_ms,playout_latency_ms,"
                "inter_arrival_ms,jitter_depth_frames,status\n";
@@ -816,7 +880,8 @@ int main(int argc, char** argv) {
         std::cerr << "Failed to send due packets while receiving: " << error.message() << '\n';
         return 1;
       }
-      if (!drain_receiver(receiver, sent_times, jitter_buffer, stats, error)) {
+      if (!drain_receiver(receiver, sent_times, jitter_buffer, next_play_sequence,
+                          adaptive_jitter, stats, error)) {
         std::cerr << "Failed to receive packet: " << error.message() << '\n';
         return 1;
       }
@@ -826,51 +891,58 @@ int main(int argc, char** argv) {
       std::this_thread::sleep_for(std::chrono::microseconds(100));
     }
 
-    if (i >= kJitterDepthFrames) {
-      play_expected_frame(static_cast<std::uint32_t>(i - kJitterDepthFrames), jitter_buffer,
-                          plc, plc_mode, boundary_smoother, playback, active_recorder, sent_times,
-                          stats);
+    const auto target_depth_frames = current_target_depth();
+    record_target_depth(target_depth_frames, stats);
+    if (next_play_sequence + target_depth_frames <= i) {
+      play_expected_frame(next_play_sequence, jitter_buffer, plc, plc_mode, target_depth_frames,
+                          boundary_smoother, playback, active_recorder, sent_times, stats);
+      ++next_play_sequence;
     }
 
     next_send_time += std::chrono::milliseconds(udp_audio::audio::kFrameDurationMs);
   }
 
-  const auto drain_until = Clock::now() + std::chrono::milliseconds(200 + options.jitter_ms);
-  while (Clock::now() < drain_until && (!pending_packets.empty() || stats.received < stats.sent)) {
-    if (!release_due_packets(pending_packets, sender, receiver_endpoint, stats, error)) {
-      std::cerr << "Failed to send delayed packets: " << error.message() << '\n';
-      return 1;
-    }
-    if (!drain_receiver(receiver, sent_times, jitter_buffer, stats, error)) {
-      std::cerr << "Failed to drain receiver: " << error.message() << '\n';
-      return 1;
-    }
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
-
-  auto tail_play_time =
-    stream_start + std::chrono::milliseconds(udp_audio::audio::kFrameDurationMs *
-                                             static_cast<std::uint32_t>(kJitterDepthFrames));
-  if (frame_count > kJitterDepthFrames) {
-    tail_play_time = next_send_time;
-  }
-
-  for (std::size_t sequence =
-         frame_count > kJitterDepthFrames ? frame_count - kJitterDepthFrames : 0;
-       sequence < frame_count; ++sequence) {
+  auto tail_play_time = next_send_time;
+  while (next_play_sequence < frame_count) {
     std::this_thread::sleep_until(tail_play_time);
     if (!release_due_packets(pending_packets, sender, receiver_endpoint, stats, error)) {
       std::cerr << "Failed to send delayed packets before tail playout: " << error.message()
                 << '\n';
       return 1;
     }
-    if (!drain_receiver(receiver, sent_times, jitter_buffer, stats, error)) {
+    if (!drain_receiver(receiver, sent_times, jitter_buffer, next_play_sequence,
+                        adaptive_jitter, stats, error)) {
       std::cerr << "Failed to drain receiver before tail playout: " << error.message() << '\n';
       return 1;
     }
-    play_expected_frame(static_cast<std::uint32_t>(sequence), jitter_buffer, plc,
-                        plc_mode, boundary_smoother, playback, active_recorder, sent_times, stats);
+    const auto target_depth_frames = current_target_depth();
+    record_target_depth(target_depth_frames, stats);
+    play_expected_frame(next_play_sequence, jitter_buffer, plc, plc_mode, target_depth_frames,
+                        boundary_smoother, playback, active_recorder, sent_times, stats);
+    ++next_play_sequence;
     tail_play_time += std::chrono::milliseconds(udp_audio::audio::kFrameDurationMs);
+  }
+
+  const auto final_drain_until = Clock::now() + std::chrono::milliseconds(50 + options.jitter_ms);
+  while (Clock::now() < final_drain_until && !pending_packets.empty()) {
+    if (!release_due_packets(pending_packets, sender, receiver_endpoint, stats, error)) {
+      std::cerr << "Failed to release late tail packets: " << error.message() << '\n';
+      return 1;
+    }
+    if (!drain_receiver(receiver, sent_times, jitter_buffer, next_play_sequence,
+                        adaptive_jitter, stats, error)) {
+      std::cerr << "Failed to drain late tail packets: " << error.message() << '\n';
+      return 1;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  for (std::size_t i = 0; i < 3; ++i) {
+    if (!drain_receiver(receiver, sent_times, jitter_buffer, next_play_sequence,
+                        adaptive_jitter, stats, error)) {
+      std::cerr << "Failed to settle late tail packets: " << error.message() << '\n';
+      return 1;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
 
   if (playback != nullptr) {
@@ -884,7 +956,8 @@ int main(int argc, char** argv) {
       (stats.played + stats.concealed + kPlaybackPrerollFrames + kPlaybackFadeOutFrames) *
       udp_audio::audio::kFrameSamples;
     const auto playback_deadline = Clock::now() + std::chrono::milliseconds(
-                                                  250 + 10 * static_cast<int>(kJitterDepthFrames));
+                                                  250 + 10 * static_cast<int>(
+                                                          kAdaptiveMaxJitterDepthFrames));
     while (Clock::now() < playback_deadline &&
            playback_state.stats.rendered_device_frames.load(std::memory_order_relaxed) <
              expected_device_frames) {
@@ -910,6 +983,13 @@ int main(int argc, char** argv) {
     inter_arrival_samples == 0
       ? 0.0
       : stats.inter_arrival_sum_ms / static_cast<double>(inter_arrival_samples);
+  const auto average_target_depth =
+    stats.target_depth_samples == 0
+      ? 0.0
+      : stats.target_depth_sum_frames / static_cast<double>(stats.target_depth_samples);
+  const auto min_target_depth =
+    stats.target_depth_samples == 0 ? 0U : stats.target_depth_min_frames;
+  const auto adaptive_stats = adaptive_jitter_controller.stats();
 
   std::cout << "\nsummary\n";
   std::cout << "receiver=" << receiver_endpoint.address << ':' << receiver_endpoint.port << '\n';
@@ -920,6 +1000,7 @@ int main(int argc, char** argv) {
   std::cout << "record_wav=" << (options.record_wav_path.empty() ? "(none)" : options.record_wav_path)
             << '\n';
   std::cout << "source_mode=" << options.source_mode << '\n';
+  std::cout << "jitter_buffer_mode=" << options.jitter_buffer_mode << '\n';
   std::cout << "generated=" << stats.generated << '\n';
   std::cout << "dropped_by_impairment=" << stats.dropped << '\n';
   std::cout << "sent=" << stats.sent << '\n';
@@ -929,9 +1010,22 @@ int main(int argc, char** argv) {
   std::cout << "output_frames=" << output_frames << '\n';
   std::cout << "datagrams=" << stats.datagrams << '\n';
   std::cout << "invalid_datagrams=" << stats.invalid_datagrams << '\n';
-  std::cout << "jitter_depth_frames=" << jitter_buffer.stats().target_depth_frames << '\n';
+  std::cout << "late_datagrams=" << stats.late_datagrams << '\n';
+  std::cout << "jitter_depth_frames=" << current_target_depth() << '\n';
+  std::cout << "jitter_depth_min_frames=" << min_target_depth << '\n';
+  std::cout << "jitter_depth_max_frames=" << stats.target_depth_max_frames << '\n';
+  std::cout << "avg_jitter_depth_frames=" << average_target_depth << '\n';
   std::cout << "jitter_underruns=" << jitter_buffer.stats().underruns << '\n';
   std::cout << "missing_frames=" << jitter_buffer.stats().underruns << '\n';
+  if (jitter_buffer_mode == JitterBufferMode::adaptive) {
+    std::cout << "adaptive_observations=" << adaptive_stats.observations << '\n';
+    std::cout << "adaptive_mean_inter_arrival_ms="
+              << adaptive_stats.mean_inter_arrival_ms << '\n';
+    std::cout << "adaptive_mean_abs_deviation_ms="
+              << adaptive_stats.mean_abs_deviation_ms << '\n';
+    std::cout << "adaptive_variance_inter_arrival_ms="
+              << adaptive_stats.variance_inter_arrival_ms << '\n';
+  }
   std::cout << "plc_mode=" << options.plc_mode << '\n';
   std::cout << "plc_boundary_crossfade_samples=" << kBoundaryCrossfadeSamples << '\n';
   std::cout << "avg_network_latency_ms=" << average_latency << '\n';

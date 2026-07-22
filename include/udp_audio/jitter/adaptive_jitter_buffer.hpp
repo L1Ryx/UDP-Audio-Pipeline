@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -11,9 +12,69 @@ namespace udp_audio::jitter {
 struct JitterBufferStats {
   double mean_inter_arrival_ms = 0.0;
   double variance_inter_arrival_ms = 0.0;
+  double mean_abs_deviation_ms = 0.0;
   std::size_t target_depth_frames = 3;
+  std::size_t min_target_depth_frames = 3;
+  std::size_t max_target_depth_frames = 3;
+  std::uint64_t observations = 0;
   std::uint64_t underruns = 0;
   std::uint64_t late_packets = 0;
+};
+
+class AdaptiveJitterController {
+ public:
+  explicit AdaptiveJitterController(std::size_t min_depth_frames = 3,
+                                    std::size_t max_depth_frames = 8,
+                                    double nominal_frame_ms = 10.0) noexcept
+      : min_depth_frames_(min_depth_frames),
+        max_depth_frames_(std::max(min_depth_frames, max_depth_frames)),
+        nominal_frame_ms_(nominal_frame_ms) {
+    stats_.target_depth_frames = min_depth_frames_;
+    stats_.min_target_depth_frames = min_depth_frames_;
+    stats_.max_target_depth_frames = min_depth_frames_;
+  }
+
+  void observe_inter_arrival(double inter_arrival_ms) noexcept {
+    constexpr double kAlpha = 0.08;
+
+    if (stats_.observations == 0) {
+      stats_.mean_inter_arrival_ms = inter_arrival_ms;
+      stats_.variance_inter_arrival_ms = 0.0;
+      stats_.mean_abs_deviation_ms = 0.0;
+    } else {
+      const double delta = inter_arrival_ms - stats_.mean_inter_arrival_ms;
+      stats_.mean_inter_arrival_ms += kAlpha * delta;
+      stats_.variance_inter_arrival_ms =
+        (1.0 - kAlpha) * (stats_.variance_inter_arrival_ms + kAlpha * delta * delta);
+      stats_.mean_abs_deviation_ms +=
+        kAlpha * (std::abs(delta) - stats_.mean_abs_deviation_ms);
+    }
+
+    ++stats_.observations;
+
+    const double late_gap_ms = std::max(0.0, inter_arrival_ms - nominal_frame_ms_);
+    const double jitter_budget_ms = std::max(stats_.mean_abs_deviation_ms * 2.0, late_gap_ms);
+    const auto extra_depth = static_cast<std::size_t>(
+      std::ceil(jitter_budget_ms / std::max(1.0, nominal_frame_ms_)));
+    const auto target_depth =
+      std::clamp(min_depth_frames_ + extra_depth, min_depth_frames_, max_depth_frames_);
+
+    stats_.target_depth_frames = target_depth;
+    stats_.min_target_depth_frames =
+      std::min(stats_.min_target_depth_frames, stats_.target_depth_frames);
+    stats_.max_target_depth_frames =
+      std::max(stats_.max_target_depth_frames, stats_.target_depth_frames);
+  }
+
+  [[nodiscard]] const JitterBufferStats& stats() const noexcept {
+    return stats_;
+  }
+
+ private:
+  std::size_t min_depth_frames_ = 3;
+  std::size_t max_depth_frames_ = 8;
+  double nominal_frame_ms_ = 10.0;
+  JitterBufferStats stats_{};
 };
 
 template <typename Frame, std::size_t Capacity>
@@ -29,16 +90,14 @@ class AdaptiveJitterBuffer {
   }
 
   void observe_inter_arrival(double inter_arrival_ms) noexcept {
-    constexpr double kAlpha = 0.05;
-    const double delta = inter_arrival_ms - stats_.mean_inter_arrival_ms;
-    stats_.mean_inter_arrival_ms += kAlpha * delta;
-    stats_.variance_inter_arrival_ms =
-      (1.0 - kAlpha) * (stats_.variance_inter_arrival_ms + kAlpha * delta * delta);
-
-    const auto suggested = static_cast<std::size_t>(
-      std::clamp(2.0 + stats_.variance_inter_arrival_ms, static_cast<double>(min_depth_frames_),
-                 static_cast<double>(max_depth_frames_)));
-    stats_.target_depth_frames = suggested;
+    controller_.observe_inter_arrival(inter_arrival_ms);
+    stats_.mean_inter_arrival_ms = controller_.stats().mean_inter_arrival_ms;
+    stats_.variance_inter_arrival_ms = controller_.stats().variance_inter_arrival_ms;
+    stats_.mean_abs_deviation_ms = controller_.stats().mean_abs_deviation_ms;
+    stats_.target_depth_frames = controller_.stats().target_depth_frames;
+    stats_.min_target_depth_frames = controller_.stats().min_target_depth_frames;
+    stats_.max_target_depth_frames = controller_.stats().max_target_depth_frames;
+    stats_.observations = controller_.stats().observations;
   }
 
   bool push(std::uint32_t sequence, const Frame& frame) noexcept {
@@ -75,8 +134,8 @@ class AdaptiveJitterBuffer {
   std::array<bool, Capacity> occupied_{};
   std::size_t min_depth_frames_ = 2;
   std::size_t max_depth_frames_ = Capacity / 2U;
+  AdaptiveJitterController controller_{min_depth_frames_, max_depth_frames_};
   JitterBufferStats stats_{};
 };
 
 }  // namespace udp_audio::jitter
-

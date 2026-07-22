@@ -1,4 +1,5 @@
 #include "udp_audio/jitter/fixed_jitter_buffer.hpp"
+#include "udp_audio/jitter/adaptive_jitter_buffer.hpp"
 
 #include <cassert>
 
@@ -44,11 +45,24 @@ void fixed_jitter_buffer_peeks_without_popping() {
   assert(stats.underruns == 0);
 }
 
+void adaptive_jitter_controller_increases_depth_on_late_gap() {
+  udp_audio::jitter::AdaptiveJitterController controller(3, 8, 10.0);
+
+  controller.observe_inter_arrival(10.0);
+  assert(controller.stats().target_depth_frames == 3);
+
+  controller.observe_inter_arrival(42.0);
+  assert(controller.stats().target_depth_frames >= 6);
+  assert(controller.stats().max_target_depth_frames >= 6);
+  assert(controller.stats().observations == 2);
+}
+
 }  // namespace
 
 int test_fixed_jitter_buffer_main() {
   fixed_jitter_buffer_reorders_by_expected_sequence();
   fixed_jitter_buffer_counts_underruns();
   fixed_jitter_buffer_peeks_without_popping();
+  adaptive_jitter_controller_increases_depth_on_late_gap();
   return 0;
 }
