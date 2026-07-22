@@ -4,7 +4,7 @@ project(
   udp_audio_pipeline
   VERSION 0.1.0
   DESCRIPTION "Low-latency UDP audio pipeline with jitter buffering, PLC, and AVX2 DSP"
-  LANGUAGES CXX)
+  LANGUAGES C CXX)
 
 option(UDP_AUDIO_BUILD_TESTS "Build smoke tests" ON)
 option(UDP_AUDIO_ENABLE_AVX2 "Enable AVX2 DSP kernels when building on x86/x64" ON)
@@ -15,6 +15,17 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(CompilerWarnings)
+
+add_library(miniaudio STATIC external/miniaudio/miniaudio.c)
+target_include_directories(miniaudio SYSTEM PUBLIC external/miniaudio)
+if(APPLE)
+  target_link_libraries(miniaudio
+    PUBLIC
+      "-framework CoreAudio"
+      "-framework AudioToolbox"
+      "-framework AudioUnit"
+      "-framework CoreFoundation")
+endif()
 
 add_library(udp_audio_core
   src/audio/frame.cpp
@@ -52,6 +63,10 @@ udp_audio_enable_warnings(udp_audio_smoke)
 add_executable(udp_audio_loopback apps/udp_audio_loopback.cpp)
 target_link_libraries(udp_audio_loopback PRIVATE udp_audio_core)
 udp_audio_enable_warnings(udp_audio_loopback)
+
+add_executable(udp_audio_miniaudio_playback apps/udp_audio_miniaudio_playback.cpp)
+target_link_libraries(udp_audio_miniaudio_playback PRIVATE udp_audio_core miniaudio)
+udp_audio_enable_warnings(udp_audio_miniaudio_playback)
 
 if(UDP_AUDIO_BUILD_TESTS)
   enable_testing()

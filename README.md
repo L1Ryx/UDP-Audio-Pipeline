@@ -23,6 +23,7 @@ ctest --preset debug
 - POSIX UDP socket wrapper.
 - Local UDP loopback demo with fixed jitter-buffer playout telemetry.
 - Hold-and-decay PLC for concealed output frames during jitter-buffer underruns.
+- miniaudio playback demo using a real audio callback.
 - Lock-free SPSC queue.
 - Starter jitter buffer, PLC, scalar DSP, and AVX2 DSP paths.
 
@@ -43,3 +44,11 @@ Example with deterministic impairment:
 ```sh
 ./build/debug/udp_audio_loopback 50 10 20 1337
 ```
+
+## Run The Playback Demo
+
+```sh
+./build/debug/udp_audio_miniaudio_playback 3
+```
+
+This plays a short 440 Hz tone through the default output device.
