@@ -17,10 +17,12 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(CompilerWarnings)
 
 add_library(udp_audio_core
+  src/audio/frame.cpp
   src/dsp/gain.cpp
   src/dsp/gain_scalar.cpp
   src/dsp/plc.cpp
   src/protocol/packet.cpp
+  src/transport/udp_socket.cpp
   src/version.cpp)
 
 target_include_directories(udp_audio_core
@@ -47,14 +49,21 @@ add_executable(udp_audio_smoke apps/udp_audio_smoke.cpp)
 target_link_libraries(udp_audio_smoke PRIVATE udp_audio_core)
 udp_audio_enable_warnings(udp_audio_smoke)
 
+add_executable(udp_audio_loopback apps/udp_audio_loopback.cpp)
+target_link_libraries(udp_audio_loopback PRIVATE udp_audio_core)
+udp_audio_enable_warnings(udp_audio_loopback)
+
 if(UDP_AUDIO_BUILD_TESTS)
   enable_testing()
   add_executable(udp_audio_tests
     tests/test_main.cpp
     tests/test_dsp.cpp
+    tests/test_audio_frame.cpp
+    tests/test_fixed_jitter_buffer.cpp
     tests/test_packet.cpp
     tests/test_plc.cpp
-    tests/test_spsc_ring_buffer.cpp)
+    tests/test_spsc_ring_buffer.cpp
+    tests/test_udp_socket.cpp)
   target_link_libraries(udp_audio_tests PRIVATE udp_audio_core)
   udp_audio_enable_warnings(udp_audio_tests)
   add_test(NAME udp_audio_tests COMMAND udp_audio_tests)

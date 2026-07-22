@@ -1,3 +1,4 @@
+#include "udp_audio/audio/frame.hpp"
 #include "udp_audio/concurrency/spsc_ring_buffer.hpp"
 #include "udp_audio/dsp/gain.hpp"
 #include "udp_audio/protocol/packet.hpp"
@@ -17,13 +18,18 @@ int main() {
   std::array<float, 4> samples{0.25F, -0.5F, 0.75F, -1.0F};
   udp_audio::dsp::apply_gain(samples, 0.5F);
 
-  const PacketHeader header{.sequence = 7, .timestamp_samples = 480, .payload_size = 960};
+  const auto audio_frame = udp_audio::audio::make_silent_frame(7);
+  const PacketHeader header{
+    .sequence = audio_frame.sequence,
+    .timestamp_samples = audio_frame.timestamp_samples,
+    .payload_size = static_cast<std::uint16_t>(udp_audio::audio::kFramePayloadBytes),
+  };
   const auto bytes = udp_audio::protocol::serialize_header(header);
   const auto parsed = udp_audio::protocol::parse_header(std::span<const std::byte, 16>(bytes));
 
   std::cout << "udp_audio_pipeline " << udp_audio::version() << '\n';
   std::cout << "queue_pop=" << queue.pop().value_or(-1) << '\n';
   std::cout << "peak=" << udp_audio::dsp::peak_abs(samples) << '\n';
+  std::cout << "frame_samples=" << audio_frame.samples.size() << '\n';
   std::cout << "packet_sequence=" << parsed.sequence << '\n';
 }
-

@@ -10,7 +10,7 @@ namespace udp_audio::protocol {
 inline constexpr std::uint16_t kMagic = 0x4155;  // "AU"
 inline constexpr std::uint8_t kVersion = 1;
 inline constexpr std::size_t kHeaderSizeBytes = 16;
-inline constexpr std::size_t kMaxPayloadBytes = 1200;
+inline constexpr std::size_t kMaxPayloadBytes = 2048;
 
 enum class PacketFlags : std::uint8_t {
   none = 0,
@@ -37,4 +37,3 @@ PacketHeader parse_header(std::span<const std::byte, kHeaderSizeBytes> bytes) no
 bool is_valid_header(const PacketHeader& header) noexcept;
 
 }  // namespace udp_audio::protocol
-
