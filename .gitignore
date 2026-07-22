@@ -1,0 +1,77 @@
+# Build outputs
+build/
+cmake-build-*/
+out/
+dist/
+bin/
+lib/
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+CTestTestfile.cmake
+DartConfiguration.tcl
+Testing/
+_deps/
+
+# CLion / JetBrains
+.idea/
+*.iml
+
+# Editors
+.vscode/
+.fleet/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# Logs and runtime traces
+*.log
+logs/
+telemetry/
+captures/
+recordings/
+
+# Audio/test artifacts
+*.wav
+*.flac
+*.aiff
+*.pcm
+*.raw
+
+# Benchmark outputs
+benchmarks/results/
+*.profraw
+*.profdata
+*.gcda
+*.gcno
+
+# Python analysis notebooks/environments
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# Local environment
+.env
+.env.*
+!.env.example
+

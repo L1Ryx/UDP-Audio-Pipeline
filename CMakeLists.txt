@@ -1,0 +1,61 @@
+cmake_minimum_required(VERSION 3.24)
+
+project(
+  udp_audio_pipeline
+  VERSION 0.1.0
+  DESCRIPTION "Low-latency UDP audio pipeline with jitter buffering, PLC, and AVX2 DSP"
+  LANGUAGES CXX)
+
+option(UDP_AUDIO_BUILD_TESTS "Build smoke tests" ON)
+option(UDP_AUDIO_ENABLE_AVX2 "Enable AVX2 DSP kernels when building on x86/x64" ON)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+include(CompilerWarnings)
+
+add_library(udp_audio_core
+  src/dsp/gain.cpp
+  src/dsp/gain_scalar.cpp
+  src/dsp/plc.cpp
+  src/protocol/packet.cpp
+  src/version.cpp)
+
+target_include_directories(udp_audio_core
+  PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>)
+
+target_compile_features(udp_audio_core PUBLIC cxx_std_20)
+udp_audio_enable_warnings(udp_audio_core)
+
+if(UDP_AUDIO_ENABLE_AVX2 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|i[3-6]86)$")
+  target_sources(udp_audio_core PRIVATE src/dsp/gain_avx2.cpp)
+  target_compile_definitions(udp_audio_core PRIVATE UDP_AUDIO_HAS_AVX2=1)
+  if(MSVC)
+    target_compile_options(udp_audio_core PRIVATE /arch:AVX2)
+  else()
+    set_source_files_properties(src/dsp/gain_avx2.cpp PROPERTIES COMPILE_OPTIONS "-mavx2")
+  endif()
+else()
+  message(STATUS "AVX2 kernels disabled for processor: ${CMAKE_SYSTEM_PROCESSOR}")
+endif()
+
+add_executable(udp_audio_smoke apps/udp_audio_smoke.cpp)
+target_link_libraries(udp_audio_smoke PRIVATE udp_audio_core)
+udp_audio_enable_warnings(udp_audio_smoke)
+
+if(UDP_AUDIO_BUILD_TESTS)
+  enable_testing()
+  add_executable(udp_audio_tests
+    tests/test_main.cpp
+    tests/test_dsp.cpp
+    tests/test_packet.cpp
+    tests/test_plc.cpp
+    tests/test_spsc_ring_buffer.cpp)
+  target_link_libraries(udp_audio_tests PRIVATE udp_audio_core)
+  udp_audio_enable_warnings(udp_audio_tests)
+  add_test(NAME udp_audio_tests COMMAND udp_audio_tests)
+endif()
