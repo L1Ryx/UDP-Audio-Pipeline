@@ -28,5 +28,17 @@ ctest --preset debug
 ## Run The Loopback Demo
 
 ```sh
-./build/debug/udp_audio_loopback
+./build/debug/udp_audio_loopback 100
+```
+
+Optional arguments:
+
+```sh
+./build/debug/udp_audio_loopback [frames] [loss_percent] [jitter_ms] [seed]
+```
+
+Example with deterministic impairment:
+
+```sh
+./build/debug/udp_audio_loopback 50 10 20 1337
 ```

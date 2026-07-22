@@ -11,8 +11,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <deque>
 #include <iostream>
 #include <limits>
+#include <random>
 #include <span>
 #include <string_view>
 #include <system_error>
@@ -31,6 +33,16 @@ constexpr std::size_t kDefaultFrameCount = 100;
 constexpr std::size_t kJitterDepthFrames = 3;
 constexpr std::size_t kJitterCapacityFrames = 64;
 
+using PacketBytes =
+  std::array<std::byte, udp_audio::protocol::kHeaderSizeBytes + udp_audio::audio::kFramePayloadBytes>;
+
+struct ProgramOptions {
+  std::size_t frame_count = kDefaultFrameCount;
+  std::uint32_t loss_percent = 0;
+  std::uint32_t jitter_ms = 0;
+  std::uint32_t seed = 1337;
+};
+
 struct BufferedFrame {
   MonoAudioFrame frame{};
   Clock::time_point arrival_time{};
@@ -39,12 +51,13 @@ struct BufferedFrame {
 };
 
 struct LoopbackStats {
+  std::size_t generated = 0;
+  std::size_t dropped = 0;
   std::size_t sent = 0;
   std::size_t received = 0;
   std::size_t played = 0;
   std::size_t datagrams = 0;
   std::size_t invalid_datagrams = 0;
-  std::uint32_t missing_packets = 0;
   std::uint32_t previous_sequence = 0;
   bool has_previous_sequence = false;
   bool has_previous_arrival = false;
@@ -58,20 +71,45 @@ struct LoopbackStats {
   double inter_arrival_max_ms = 0.0;
 };
 
-std::size_t parse_frame_count(int argc, char** argv) {
-  if (argc < 2) {
-    return kDefaultFrameCount;
-  }
+struct PendingPacket {
+  PacketBytes bytes{};
+  Clock::time_point deliver_at{};
+};
 
-  std::size_t value = 0;
-  const std::string_view input(argv[1]);
+template <typename T>
+bool parse_unsigned_arg(std::string_view input, T& value) {
   const auto result = std::from_chars(input.data(), input.data() + input.size(), value);
-  if (result.ec != std::errc{} || value == 0) {
-    std::cerr << "Usage: udp_audio_loopback [frame_count]\n";
-    return kDefaultFrameCount;
+  return result.ec == std::errc{} && result.ptr == input.data() + input.size();
+}
+
+ProgramOptions parse_options(int argc, char** argv) {
+  ProgramOptions options{};
+
+  if (argc > 1 && !parse_unsigned_arg(std::string_view(argv[1]), options.frame_count)) {
+    std::cerr << "Usage: udp_audio_loopback [frame_count] [loss_percent] [jitter_ms] [seed]\n";
+    options.frame_count = kDefaultFrameCount;
   }
 
-  return value;
+  if (argc > 2 && !parse_unsigned_arg(std::string_view(argv[2]), options.loss_percent)) {
+    std::cerr << "Usage: udp_audio_loopback [frame_count] [loss_percent] [jitter_ms] [seed]\n";
+    options.loss_percent = 0;
+  }
+
+  if (argc > 3 && !parse_unsigned_arg(std::string_view(argv[3]), options.jitter_ms)) {
+    std::cerr << "Usage: udp_audio_loopback [frame_count] [loss_percent] [jitter_ms] [seed]\n";
+    options.jitter_ms = 0;
+  }
+
+  if (argc > 4 && !parse_unsigned_arg(std::string_view(argv[4]), options.seed)) {
+    std::cerr << "Usage: udp_audio_loopback [frame_count] [loss_percent] [jitter_ms] [seed]\n";
+    options.seed = 1337;
+  }
+
+  if (options.frame_count == 0) {
+    options.frame_count = kDefaultFrameCount;
+  }
+  options.loss_percent = std::min<std::uint32_t>(options.loss_percent, 100);
+  return options;
 }
 
 MonoAudioFrame make_sine_frame(std::uint32_t sequence, double& phase) {
@@ -94,13 +132,10 @@ MonoAudioFrame make_sine_frame(std::uint32_t sequence, double& phase) {
   return frame;
 }
 
-std::array<std::byte, udp_audio::protocol::kHeaderSizeBytes + udp_audio::audio::kFramePayloadBytes>
-make_packet(const MonoAudioFrame& frame) {
+PacketBytes make_packet(const MonoAudioFrame& frame) {
   using udp_audio::protocol::PacketHeader;
 
-  std::array<std::byte, udp_audio::protocol::kHeaderSizeBytes +
-                         udp_audio::audio::kFramePayloadBytes>
-    packet{};
+  PacketBytes packet{};
 
   const PacketHeader header{
     .sequence = frame.sequence,
@@ -121,10 +156,6 @@ BufferedFrame make_buffered_frame(const udp_audio::protocol::PacketHeader& heade
                                   Clock::time_point arrival_time,
                                   const std::vector<Clock::time_point>& sent_times,
                                   LoopbackStats& stats) {
-  if (stats.has_previous_sequence && header.sequence > stats.previous_sequence + 1U) {
-    stats.missing_packets += header.sequence - stats.previous_sequence - 1U;
-  }
-
   stats.previous_sequence = header.sequence;
   stats.has_previous_sequence = true;
 
@@ -205,6 +236,57 @@ bool drain_receiver(udp_audio::transport::UdpSocket& receiver,
   }
 }
 
+bool release_due_packets(std::deque<PendingPacket>& pending_packets,
+                         udp_audio::transport::UdpSocket& sender,
+                         const udp_audio::transport::Endpoint& receiver_endpoint,
+                         LoopbackStats& stats,
+                         std::error_code& error) {
+  const auto now = Clock::now();
+  auto packet = pending_packets.begin();
+
+  while (packet != pending_packets.end()) {
+    if (packet->deliver_at > now) {
+      ++packet;
+      continue;
+    }
+
+    const auto sent = sender.send_to(packet->bytes, receiver_endpoint, error);
+    if (error || sent != packet->bytes.size()) {
+      return false;
+    }
+
+    ++stats.sent;
+    packet = pending_packets.erase(packet);
+  }
+
+  return true;
+}
+
+void schedule_packet(PacketBytes packet,
+                     const ProgramOptions& options,
+                     std::mt19937& rng,
+                     std::deque<PendingPacket>& pending_packets,
+                     LoopbackStats& stats) {
+  ++stats.generated;
+
+  std::uniform_int_distribution<std::uint32_t> loss_distribution(1, 100);
+  if (options.loss_percent > 0 && loss_distribution(rng) <= options.loss_percent) {
+    ++stats.dropped;
+    return;
+  }
+
+  std::uint32_t delay_ms = 0;
+  if (options.jitter_ms > 0) {
+    std::uniform_int_distribution<std::uint32_t> jitter_distribution(0, options.jitter_ms);
+    delay_ms = jitter_distribution(rng);
+  }
+
+  pending_packets.push_back(PendingPacket{
+    .bytes = packet,
+    .deliver_at = Clock::now() + std::chrono::milliseconds(delay_ms),
+  });
+}
+
 void play_expected_frame(std::uint32_t sequence,
                          udp_audio::jitter::FixedJitterBuffer<BufferedFrame,
                                                                kJitterCapacityFrames>& jitter_buffer,
@@ -213,7 +295,7 @@ void play_expected_frame(std::uint32_t sequence,
   const auto now = Clock::now();
   auto frame = jitter_buffer.pop_expected(sequence);
   if (!frame.has_value()) {
-    std::cout << sequence << ",,,," << kJitterDepthFrames << ",underrun\n";
+    std::cout << sequence << ",,,,," << kJitterDepthFrames << ",underrun\n";
     return;
   }
 
@@ -233,7 +315,8 @@ void play_expected_frame(std::uint32_t sequence,
 }  // namespace
 
 int main(int argc, char** argv) {
-  const auto frame_count = parse_frame_count(argc, argv);
+  const auto options = parse_options(argc, argv);
+  const auto frame_count = options.frame_count;
 
   std::error_code error;
   auto receiver = udp_audio::transport::UdpSocket::open_ipv4(error);
@@ -264,6 +347,8 @@ int main(int argc, char** argv) {
   udp_audio::jitter::FixedJitterBuffer<BufferedFrame, kJitterCapacityFrames> jitter_buffer(
     kJitterDepthFrames);
   LoopbackStats stats{};
+  std::deque<PendingPacket> pending_packets;
+  std::mt19937 rng(options.seed);
   double phase = 0.0;
   const auto stream_start = Clock::now();
   auto next_send_time = stream_start;
@@ -278,21 +363,24 @@ int main(int argc, char** argv) {
     const auto packet = make_packet(frame);
     sent_times[i] = Clock::now();
 
-    const auto sent = sender.send_to(packet, receiver_endpoint, error);
-    if (error || sent != packet.size()) {
-      std::cerr << "Failed to send packet " << i << ": " << error.message() << '\n';
+    schedule_packet(packet, options, rng, pending_packets, stats);
+
+    if (!release_due_packets(pending_packets, sender, receiver_endpoint, stats, error)) {
+      std::cerr << "Failed to send due packets: " << error.message() << '\n';
       return 1;
     }
 
-    ++stats.sent;
-
     const auto receive_until = Clock::now() + std::chrono::milliseconds(2);
     while (Clock::now() < receive_until) {
+      if (!release_due_packets(pending_packets, sender, receiver_endpoint, stats, error)) {
+        std::cerr << "Failed to send due packets while receiving: " << error.message() << '\n';
+        return 1;
+      }
       if (!drain_receiver(receiver, sent_times, jitter_buffer, stats, error)) {
         std::cerr << "Failed to receive packet: " << error.message() << '\n';
         return 1;
       }
-      if (stats.received >= stats.sent) {
+      if (pending_packets.empty() && stats.received >= stats.sent) {
         break;
       }
       std::this_thread::sleep_for(std::chrono::microseconds(100));
@@ -306,8 +394,12 @@ int main(int argc, char** argv) {
     next_send_time += std::chrono::milliseconds(udp_audio::audio::kFrameDurationMs);
   }
 
-  const auto drain_until = Clock::now() + std::chrono::milliseconds(200);
-  while (Clock::now() < drain_until && stats.received < stats.sent) {
+  const auto drain_until = Clock::now() + std::chrono::milliseconds(200 + options.jitter_ms);
+  while (Clock::now() < drain_until && (!pending_packets.empty() || stats.received < stats.sent)) {
+    if (!release_due_packets(pending_packets, sender, receiver_endpoint, stats, error)) {
+      std::cerr << "Failed to send delayed packets: " << error.message() << '\n';
+      return 1;
+    }
     if (!drain_receiver(receiver, sent_times, jitter_buffer, stats, error)) {
       std::cerr << "Failed to drain receiver: " << error.message() << '\n';
       return 1;
@@ -326,6 +418,11 @@ int main(int argc, char** argv) {
          frame_count > kJitterDepthFrames ? frame_count - kJitterDepthFrames : 0;
        sequence < frame_count; ++sequence) {
     std::this_thread::sleep_until(tail_play_time);
+    if (!release_due_packets(pending_packets, sender, receiver_endpoint, stats, error)) {
+      std::cerr << "Failed to send delayed packets before tail playout: " << error.message()
+                << '\n';
+      return 1;
+    }
     if (!drain_receiver(receiver, sent_times, jitter_buffer, stats, error)) {
       std::cerr << "Failed to drain receiver before tail playout: " << error.message() << '\n';
       return 1;
@@ -346,6 +443,11 @@ int main(int argc, char** argv) {
 
   std::cout << "\nsummary\n";
   std::cout << "receiver=" << receiver_endpoint.address << ':' << receiver_endpoint.port << '\n';
+  std::cout << "configured_loss_percent=" << options.loss_percent << '\n';
+  std::cout << "configured_jitter_ms=" << options.jitter_ms << '\n';
+  std::cout << "seed=" << options.seed << '\n';
+  std::cout << "generated=" << stats.generated << '\n';
+  std::cout << "dropped_by_impairment=" << stats.dropped << '\n';
   std::cout << "sent=" << stats.sent << '\n';
   std::cout << "received=" << stats.received << '\n';
   std::cout << "played=" << stats.played << '\n';
@@ -353,7 +455,7 @@ int main(int argc, char** argv) {
   std::cout << "invalid_datagrams=" << stats.invalid_datagrams << '\n';
   std::cout << "jitter_depth_frames=" << jitter_buffer.stats().target_depth_frames << '\n';
   std::cout << "jitter_underruns=" << jitter_buffer.stats().underruns << '\n';
-  std::cout << "missing_packets=" << stats.missing_packets + (stats.sent - stats.received) << '\n';
+  std::cout << "missing_frames=" << jitter_buffer.stats().underruns << '\n';
   std::cout << "avg_network_latency_ms=" << average_latency << '\n';
   std::cout << "min_network_latency_ms=" << (stats.received == 0 ? 0.0 : stats.latency_min_ms)
             << '\n';
