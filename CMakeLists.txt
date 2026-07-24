@@ -49,6 +49,10 @@ target_include_directories(udp_audio_core
 target_compile_features(udp_audio_core PUBLIC cxx_std_20)
 udp_audio_enable_warnings(udp_audio_core)
 
+if(WIN32)
+  target_link_libraries(udp_audio_core PUBLIC ws2_32)
+endif()
+
 if(UDP_AUDIO_ENABLE_AVX2 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|i[3-6]86)$")
   target_sources(udp_audio_core PRIVATE src/dsp/gain_avx2.cpp)
   target_compile_definitions(udp_audio_core PRIVATE UDP_AUDIO_HAS_AVX2=1)
@@ -115,32 +119,53 @@ if(UDP_AUDIO_ENABLE_OPUS)
       add_test(NAME udp_audio_opus_tests COMMAND udp_audio_opus_tests)
     endif()
 
-    if(SDL3_FOUND AND OpenGL_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/imgui/imgui.cpp")
-      add_library(imgui_sdl3_opengl STATIC
-        external/imgui/imgui.cpp
-        external/imgui/imgui_demo.cpp
-        external/imgui/imgui_draw.cpp
-        external/imgui/imgui_tables.cpp
-        external/imgui/imgui_widgets.cpp
-        external/imgui/backends/imgui_impl_sdl3.cpp
-        external/imgui/backends/imgui_impl_opengl3.cpp)
-      target_include_directories(imgui_sdl3_opengl
-        SYSTEM
-        PUBLIC
-          external/imgui
-          external/imgui/backends)
-      target_link_libraries(imgui_sdl3_opengl PUBLIC SDL3::SDL3 OpenGL::GL)
-      target_compile_features(imgui_sdl3_opengl PUBLIC cxx_std_20)
+    if(SDL3_FOUND AND OpenGL_FOUND)
+      set(UDP_AUDIO_IMGUI_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/imgui")
+      if(NOT EXISTS "${UDP_AUDIO_IMGUI_SOURCE_DIR}/imgui.cpp")
+        include(FetchContent)
+        FetchContent_Declare(dear_imgui
+          GIT_REPOSITORY https://github.com/ocornut/imgui.git
+          GIT_TAG v1.92.1
+          SOURCE_SUBDIR cmake-do-not-add)
+        FetchContent_MakeAvailable(dear_imgui)
+        FetchContent_GetProperties(dear_imgui SOURCE_DIR dear_imgui_SOURCE_DIR)
+        set(UDP_AUDIO_IMGUI_SOURCE_DIR "${dear_imgui_SOURCE_DIR}")
+      endif()
 
-      add_executable(lossy_audio_lab apps/lossy_audio_lab.cpp)
-      target_link_libraries(lossy_audio_lab
-        PRIVATE
-          udp_audio_opus_sim
-          miniaudio
-          imgui_sdl3_opengl)
-      udp_audio_enable_warnings(lossy_audio_lab)
+      if(EXISTS "${UDP_AUDIO_IMGUI_SOURCE_DIR}/imgui.cpp")
+        add_library(imgui_sdl3_opengl STATIC
+          "${UDP_AUDIO_IMGUI_SOURCE_DIR}/imgui.cpp"
+          "${UDP_AUDIO_IMGUI_SOURCE_DIR}/imgui_draw.cpp"
+          "${UDP_AUDIO_IMGUI_SOURCE_DIR}/imgui_tables.cpp"
+          "${UDP_AUDIO_IMGUI_SOURCE_DIR}/imgui_widgets.cpp"
+          "${UDP_AUDIO_IMGUI_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp"
+          "${UDP_AUDIO_IMGUI_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp")
+        target_include_directories(imgui_sdl3_opengl
+          SYSTEM
+          PUBLIC
+            "${UDP_AUDIO_IMGUI_SOURCE_DIR}"
+            "${UDP_AUDIO_IMGUI_SOURCE_DIR}/backends")
+        target_link_libraries(imgui_sdl3_opengl PUBLIC SDL3::SDL3 OpenGL::GL)
+        target_compile_features(imgui_sdl3_opengl PUBLIC cxx_std_20)
+
+        add_executable(lossy_audio_lab apps/lossy_audio_lab.cpp)
+        target_link_libraries(lossy_audio_lab
+          PRIVATE
+            udp_audio_opus_sim
+            miniaudio
+            imgui_sdl3_opengl)
+        udp_audio_enable_warnings(lossy_audio_lab)
+
+        install(TARGETS lossy_audio_lab
+          RUNTIME DESTINATION .
+          BUNDLE DESTINATION .)
+        install(FILES README.md DESTINATION .)
+        install(DIRECTORY docs DESTINATION . FILES_MATCHING PATTERN "*.md")
+      else()
+        message(STATUS "Dear ImGui not found; lossy_audio_lab will not be built")
+      endif()
     else()
-      message(STATUS "SDL3/OpenGL/ImGui not found; lossy_audio_lab will not be built")
+      message(STATUS "SDL3/OpenGL not found; lossy_audio_lab will not be built")
     endif()
   else()
     message(STATUS "libopus not found; udp_audio_opus_loopback will not be built")

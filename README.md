@@ -147,3 +147,9 @@ bench:
 Use it to run repeatable Opus loss/jitter scenarios, play the decoded output, and view
 waveform, frame energy, recovery status, and profiling counters. The lab can also
 load WAV or MP3 files for testing your own audio.
+
+## Releases
+
+The app target is `lossy_audio_lab`. GitHub Actions can package macOS and Windows
+zips from a version tag such as `v0.1.0`; see `docs/RELEASE.md`.
+

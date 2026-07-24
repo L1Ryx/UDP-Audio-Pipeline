@@ -11,6 +11,9 @@ lib/
 *.dll
 *.exe
 
+# Optional local dependency checkouts
+external/imgui/
+
 # CMake
 CMakeFiles/
 CMakeCache.txt

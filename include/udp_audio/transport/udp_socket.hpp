@@ -42,7 +42,7 @@ class UdpSocket {
   [[nodiscard]] static UdpSocket open_ipv4(std::error_code& error) noexcept;
 
   [[nodiscard]] bool valid() const noexcept;
-  [[nodiscard]] int native_handle() const noexcept;
+  [[nodiscard]] std::intptr_t native_handle() const noexcept;
 
   bool bind(const Endpoint& endpoint, std::error_code& error) noexcept;
   bool set_non_blocking(bool enabled, std::error_code& error) noexcept;
@@ -59,9 +59,9 @@ class UdpSocket {
   void close() noexcept;
 
  private:
-  explicit UdpSocket(int fd) noexcept;
+  explicit UdpSocket(std::intptr_t fd) noexcept;
 
-  int fd_ = -1;
+  std::intptr_t fd_ = -1;
 };
 
 }  // namespace udp_audio::transport
