@@ -59,6 +59,6 @@ Wi-Fi, hotspot, and stress cases.
 For a quick decoder/simulator smoke test without opening the UI:
 
 ```sh
-./cmake-build-debug/udp_audio_imgui_lab --headless-file /path/to/audio.wav
-./cmake-build-debug/udp_audio_imgui_lab --headless-file /path/to/audio.mp3
+./cmake-build-debug/lossy_audio_lab --headless-file /path/to/audio.wav
+./cmake-build-debug/lossy_audio_lab --headless-file /path/to/audio.mp3
 ```

@@ -1,9 +1,9 @@
 cmake_minimum_required(VERSION 3.24)
 
 project(
-  udp_audio_pipeline
+  lossy_audio_lab
   VERSION 0.1.0
-  DESCRIPTION "Low-latency UDP audio pipeline with jitter buffering, PLC, and AVX2 DSP"
+  DESCRIPTION "Interactive C++ audio lab for packet loss, jitter, Opus recovery, and DSP profiling"
   LANGUAGES C CXX)
 
 option(UDP_AUDIO_BUILD_TESTS "Build smoke tests" ON)
@@ -132,15 +132,15 @@ if(UDP_AUDIO_ENABLE_OPUS)
       target_link_libraries(imgui_sdl3_opengl PUBLIC SDL3::SDL3 OpenGL::GL)
       target_compile_features(imgui_sdl3_opengl PUBLIC cxx_std_20)
 
-      add_executable(udp_audio_imgui_lab apps/udp_audio_imgui_lab.cpp)
-      target_link_libraries(udp_audio_imgui_lab
+      add_executable(lossy_audio_lab apps/lossy_audio_lab.cpp)
+      target_link_libraries(lossy_audio_lab
         PRIVATE
           udp_audio_opus_sim
           miniaudio
           imgui_sdl3_opengl)
-      udp_audio_enable_warnings(udp_audio_imgui_lab)
+      udp_audio_enable_warnings(lossy_audio_lab)
     else()
-      message(STATUS "SDL3/OpenGL/ImGui not found; udp_audio_imgui_lab will not be built")
+      message(STATUS "SDL3/OpenGL/ImGui not found; lossy_audio_lab will not be built")
     endif()
   else()
     message(STATUS "libopus not found; udp_audio_opus_loopback will not be built")

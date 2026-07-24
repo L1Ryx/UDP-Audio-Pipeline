@@ -27,7 +27,7 @@ int main() {
   const auto bytes = udp_audio::protocol::serialize_header(header);
   const auto parsed = udp_audio::protocol::parse_header(std::span<const std::byte, 16>(bytes));
 
-  std::cout << "udp_audio_pipeline " << udp_audio::version() << '\n';
+  std::cout << "lossy_audio_lab " << udp_audio::version() << '\n';
   std::cout << "queue_pop=" << queue.pop().value_or(-1) << '\n';
   std::cout << "peak=" << udp_audio::dsp::peak_abs(samples) << '\n';
   std::cout << "frame_samples=" << audio_frame.samples.size() << '\n';
