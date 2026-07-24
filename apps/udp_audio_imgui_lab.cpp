@@ -734,7 +734,7 @@ int main(int argc, char** argv) {
       ImGui::BeginChild("controls_panel", ImVec2(0.0F, top_panel_height), false,
                         ImGuiWindowFlags_None);
 
-      ImGui::TextUnformatted("Presets");
+      ImGui::TextUnformatted("Network Profile");
       ImGui::Separator();
       const float preset_width = half_width_button();
         if (ImGui::Button("Clean LAN", ImVec2(preset_width, 0))) {
@@ -766,17 +766,17 @@ int main(int argc, char** argv) {
         }
 
       ImGui::Spacing();
-      ImGui::TextUnformatted("Transport");
+      ImGui::TextUnformatted("Preview");
       ImGui::Separator();
-        if (ImGui::Button("Run", ImVec2(100, 0))) {
+        if (ImGui::Button("Simulate", ImVec2(100, 0))) {
           result = run_with_seed_policy(settings, playback, reroll_seed_on_run);
         }
         ImGui::SameLine();
-        if (ImGui::Button("Play", ImVec2(100, 0)) && audio_ok && !result.samples.empty()) {
+        if (ImGui::Button("Play Preview", ImVec2(120, 0)) && audio_ok && !result.samples.empty()) {
           resume_or_start_playback(playback, result.samples);
         }
         ImGui::SameLine();
-        if (ImGui::Button("Stop", ImVec2(100, 0))) {
+        if (ImGui::Button("Pause", ImVec2(80, 0))) {
           stop_playback(playback);
         }
 
@@ -801,9 +801,9 @@ int main(int argc, char** argv) {
         }
 
       ImGui::Spacing();
-      ImGui::TextUnformatted("Audio Source");
+      ImGui::TextUnformatted("Audio Input");
       ImGui::Separator();
-        ImGui::InputText("WAV/MP3 Path", audio_path.data(), audio_path.size());
+        ImGui::InputText("Audio File", audio_path.data(), audio_path.size());
         if (ImGui::Button("Browse", ImVec2(100, 0)) && !file_dialog_open) {
           file_dialog_open = true;
           SDL_ShowOpenFileDialog(file_dialog_callback, &file_dialog_state, window,
@@ -819,17 +819,17 @@ int main(int argc, char** argv) {
         ImGui::TextWrapped("%s", audio_load_status.c_str());
 
       ImGui::Spacing();
-      ImGui::TextUnformatted("Diagnostic Sources");
+      ImGui::TextUnformatted("Diagnostic Tests");
       show_tooltip_if_hovered(
         "Sine and chirp are synthetic probes for checking recovery behavior. Load WAV/MP3 for normal listening previews.");
       ImGui::Separator();
         int source_index = settings.source_mode == SourceMode::chirp ? 1 : 0;
-        if (ImGui::Combo("Test Signal", &source_index, "sine\0chirp\0")) {
+        if (ImGui::Combo("Diagnostic Signal", &source_index, "sine\0chirp\0")) {
           settings.source_mode = source_index == 1 ? SourceMode::chirp : SourceMode::sine;
           settings.input_mode = InputMode::generated;
           audio_load_status = "Using diagnostic source";
         }
-        if (ImGui::Button("Use Diagnostic Source", ImVec2(-1.0F, 0))) {
+        if (ImGui::Button("Use Test Tone", ImVec2(-1.0F, 0))) {
           settings.input_mode = InputMode::generated;
           settings.input_label.clear();
           audio_load_status = "Using diagnostic source";
@@ -837,7 +837,7 @@ int main(int argc, char** argv) {
         }
 
       ImGui::Spacing();
-      ImGui::TextUnformatted("Network");
+      ImGui::TextUnformatted("Packet Loss");
       ImGui::Separator();
         if (settings.input_mode == InputMode::file) {
           ImGui::BeginDisabled();
@@ -871,10 +871,10 @@ int main(int argc, char** argv) {
         ImGui::SliderInt("Jitter Depth", &settings.jitter_depth_frames, 1, 12);
 
       ImGui::Spacing();
-      ImGui::TextUnformatted("Recovery");
+      ImGui::TextUnformatted("Repair Strategy");
       ImGui::Separator();
         int recovery_index = settings.recovery_mode == RecoveryMode::fec ? 1 : 0;
-        if (ImGui::Combo("Recovery", &recovery_index, "plc\0fec\0")) {
+        if (ImGui::Combo("Strategy", &recovery_index, "plc\0fec\0")) {
           settings.recovery_mode =
             recovery_index == 1 ? RecoveryMode::fec : RecoveryMode::plc;
         }
@@ -885,7 +885,7 @@ int main(int argc, char** argv) {
       ImGui::BeginChild("summary_panel", ImVec2(0.0F, top_panel_height), false,
                         ImGuiWindowFlags_None);
 
-      ImGui::TextUnformatted("Summary");
+      ImGui::TextUnformatted("Analysis");
       ImGui::Separator();
       constexpr float kTimelinePanelHeight = 92.0F;
       const float summary_metrics_height =
@@ -911,7 +911,7 @@ int main(int argc, char** argv) {
       }
 
       ImGui::Spacing();
-      ImGui::TextUnformatted("Network Impairment");
+      ImGui::TextUnformatted("Packet Loss");
       if (begin_summary_table("network_summary")) {
         draw_summary_row("Loss model", udp_audio::sim::loss_model_name(settings.loss_model));
         draw_summary_rowf("Configured loss", "%d%%", settings.loss_percent);
@@ -923,7 +923,7 @@ int main(int argc, char** argv) {
       }
 
       ImGui::Spacing();
-      ImGui::TextUnformatted("Recovery");
+      ImGui::TextUnformatted("Repair");
       if (begin_summary_table("recovery_summary")) {
         draw_summary_row("Mode",
                          settings.recovery_mode == RecoveryMode::fec ? "fec" : "plc");
@@ -982,7 +982,7 @@ int main(int argc, char** argv) {
     ImGui::Spacing();
 
         if (!result.waveform_plot.empty()) {
-          ImGui::TextUnformatted("Output Waveform");
+          ImGui::TextUnformatted("Recovered Audio");
           const float progress = playback_progress(playback);
           ImGui::PlotLines("##waveform", result.waveform_plot.data(),
                            static_cast<int>(result.waveform_plot.size()), 0, nullptr, -0.25F,
@@ -994,7 +994,7 @@ int main(int argc, char** argv) {
         }
 
         if (!result.frame_energy.empty()) {
-          ImGui::TextUnformatted("Frame RMS");
+          ImGui::TextUnformatted("Frame Energy");
           ImGui::PlotLines("##energy", result.frame_energy.data(),
                            static_cast<int>(result.frame_energy.size()), 0, nullptr, 0.0F,
                            0.22F, ImVec2(-1.0F, 120.0F));
