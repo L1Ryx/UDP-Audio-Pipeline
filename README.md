@@ -1,155 +1,68 @@
 # Lossy Audio Lab
 
-A C++20 audio lab for previewing how packet loss, jitter, Opus recovery, and
-SIMD DSP affect playback.
+Lossy Audio Lab is a desktop app for hearing how audio changes when packets are
+lost, delayed, or recovered in a real-time-style audio pipeline.
 
-The core target is simple and measurable: send or simulate 48 kHz audio with clear
-telemetry for latency, jitter, packet loss, recovery behavior, and DSP cost.
+Load a WAV or MP3, choose a network preset, press Run, and compare the result with
+waveform, loudness, recovery timeline, and latency metrics.
 
-## Build
+## What It Does
 
-Open this folder in CLion, or build from a terminal:
+- Loads WAV and MP3 files.
+- Simulates independent and burst packet loss.
+- Adds configurable jitter and playout buffering.
+- Recovers missing audio with Opus redundancy, FEC, and PLC paths.
+- Shows waveform, frame RMS, recovery status, and runtime metrics.
+- Includes diagnostic sine/chirp sources for repeatable stress tests.
 
-```sh
-cmake --preset debug
-cmake --build --preset debug
-ctest --preset debug
-```
+The presets are controlled listening scenarios, not exact models of a specific
+router, carrier, or conferencing app. They are meant to make loss and recovery
+tradeoffs easy to hear and compare.
 
-## Current Pieces
+## Download
 
-- 10 ms mono audio frames: 480 float samples at 48 kHz.
-- 16-byte UDP packet header.
-- POSIX UDP socket wrapper.
-- Local UDP loopback demo with fixed jitter-buffer playout telemetry.
-- Hold-and-decay PLC for concealed output frames during jitter-buffer underruns.
-- Opus encode/decode loopback baseline using decoder-side PLC.
-- miniaudio playback demo using a real audio callback.
-- Lock-free SPSC queue.
-- Starter jitter buffer, PLC, scalar DSP, NEON DSP, and AVX2 DSP paths.
+Prebuilt packages are available from GitHub Releases:
 
-## Run The Loopback Demo
+- `Lossy-Audio-Lab-macOS-arm64.zip`
+- `Lossy-Audio-Lab-Windows-x64.zip`
 
-```sh
-./build/debug/udp_audio_loopback 100
-```
+Unzip the package and run the `lossy_audio_lab` executable.
 
-Optional arguments:
+On macOS, the binary is currently unsigned. If macOS blocks the first launch,
+right-click the executable and choose Open, or allow it from System Settings.
 
-```sh
-./build/debug/udp_audio_loopback [frames] [loss_percent] [jitter_ms] [seed] [play_audio] [record_wav] [plc_mode] [source_mode] [jitter_buffer_mode]
-```
+## Build From Source
 
-Example with deterministic impairment:
+Requirements:
 
-```sh
-./build/debug/udp_audio_loopback 50 10 20 1337
-```
+- CMake 3.24+
+- C++20 compiler
+- Opus
+- SDL3
+- OpenGL
+- Ninja, recommended
 
-Set `play_audio` to `1` to play the jitter/PLC output through miniaudio:
+From the repository root:
 
 ```sh
-./build/debug/udp_audio_loopback 100 10 20 1337 1
+cmake --preset release
+cmake --build --preset release --target lossy_audio_lab
+./build/release/lossy_audio_lab
 ```
 
-Record the receiver playout stream to a 48 kHz mono float WAV:
+For CLion, open the repository folder, select the `lossy_audio_lab` target, and
+build/run it from the IDE.
 
-```sh
-./build/debug/udp_audio_loopback 100 10 20 1337 0 recordings/output.wav
-```
+## Project Notes
 
-PLC modes for comparison:
+The app is built around 48 kHz mono float PCM, 10 ms audio frames, Opus encode /
+decode, a jitter-buffered playout model, and measurable recovery behavior. The
+command-line tools and tests in the repository are development aids for validating
+those pieces, while the GUI is the user-facing release target.
 
-- `none`: missing frames become silence.
-- `repeat`: repeat the previous frame with decay.
-- `periodic`: estimate a whole-sample waveform period and continue it.
-- `periodic_interp`: estimate a fractional waveform period and continue it.
+More technical notes live in `docs/`.
 
-```sh
-./build/debug/udp_audio_loopback 50 20 25 1337 0 recordings/plc_periodic_interp.wav periodic_interp
-```
+## Release Builds
 
-Source modes:
-
-- `sine`: steady 440 Hz tone.
-- `chirp`: 220 Hz to 880 Hz sweep.
-
-```sh
-./build/debug/udp_audio_loopback 100 20 25 1337 1 recordings/chirp_periodic_interp.wav periodic_interp chirp
-```
-
-Jitter buffer modes:
-
-- `fixed`: fixed 3-frame playout depth.
-- `adaptive`: increases playout depth when packet timing gets bursty.
-
-```sh
-./build/debug/udp_audio_loopback 80 0 45 1337 0 recordings/jitter_adaptive_45ms.wav periodic_interp chirp adaptive
-```
-
-## Run The Opus Baseline
-
-If `libopus` is installed, CMake builds an Opus loopback target:
-
-```sh
-./build/debug/udp_audio_opus_loopback [frames] [loss_percent] [jitter_ms] [seed] [record_wav] [source_mode] [bitrate_bps] [recovery_mode] [play_audio] [redundancy_frames] [jitter_depth_frames]
-```
-
-Example:
-
-```sh
-./build/debug/udp_audio_opus_loopback 100 20 25 1337 recordings/chirp_opus_plc.wav chirp
-```
-
-Missing packets are concealed by the Opus decoder and counted as `opus_plc_frames`
-in the summary.
-
-Add `fec` as the final argument to enable Opus in-band forward error correction:
-
-```sh
-./build/debug/udp_audio_opus_loopback 100 20 25 1337 recordings/chirp_opus_fec.wav chirp 64000 fec
-```
-
-The Opus loopback defaults to a playback-safe profile: 5-frame jitter depth and 3
-redundant Opus repair frames per packet. Redundancy is counted as
-`redundancy_recovered`; any frame that cannot be recovered falls back to Opus FEC or
-Opus PLC.
-
-Set `play_audio` to `1` to listen to the decoded Opus playout stream live:
-
-```sh
-./build/debug/udp_audio_opus_loopback 100 20 25 1337 recordings/chirp_opus_fec.wav chirp 64000 fec 1
-```
-
-Disable redundancy or force the old 3-frame depth for comparison:
-
-```sh
-./build/debug/udp_audio_opus_loopback 100 20 25 1337 recordings/chirp_opus_tight.wav chirp 64000 fec 0 0 3
-```
-
-## Run The Playback Demo
-
-```sh
-./build/debug/udp_audio_miniaudio_playback 3
-```
-
-This plays a short 440 Hz tone through the default output device.
-
-## Run Lossy Audio Lab
-
-If SDL3, OpenGL, Opus, and Dear ImGui are available, CMake builds an interactive test
-bench:
-
-```sh
-./build/debug/lossy_audio_lab
-```
-
-Use it to run repeatable Opus loss/jitter scenarios, play the decoded output, and view
-waveform, frame energy, recovery status, and profiling counters. The lab can also
-load WAV or MP3 files for testing your own audio.
-
-## Releases
-
-The app target is `lossy_audio_lab`. GitHub Actions can package macOS and Windows
-zips from a version tag such as `v0.1.0`; see `docs/RELEASE.md`.
-
+GitHub Actions packages macOS and Windows zips when a version tag such as `v0.1.0`
+is pushed. See `docs/RELEASE.md` for the release checklist.
