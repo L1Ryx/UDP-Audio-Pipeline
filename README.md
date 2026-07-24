@@ -1,10 +1,10 @@
-# Low-Latency UDP Audio Pipeline
+# Lossy Audio Lab
 
-A C++20 audio streaming engine built around custom UDP packets, jitter buffering,
-packet loss concealment, and SIMD DSP.
+A C++20 audio lab for previewing how packet loss, jitter, Opus recovery, and
+SIMD DSP affect playback.
 
-The first target is simple and measurable: send 48 kHz float PCM across a LAN or local
-loopback with clear telemetry for latency, jitter, packet loss, and DSP cost.
+The core target is simple and measurable: send or simulate 48 kHz audio with clear
+telemetry for latency, jitter, packet loss, recovery behavior, and DSP cost.
 
 ## Build
 
@@ -145,4 +145,5 @@ bench:
 ```
 
 Use it to run repeatable Opus loss/jitter scenarios, play the decoded output, and view
-waveform, frame energy, recovery status, and profiling counters.
+waveform, frame energy, recovery status, and profiling counters. The lab can also
+load WAV or MP3 files for testing your own audio.

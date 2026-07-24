@@ -14,6 +14,16 @@ enum class OpusRecoveryMode {
   fec,
 };
 
+enum class OpusLossModel {
+  independent,
+  burst,
+};
+
+enum class OpusInputMode {
+  generated,
+  file,
+};
+
 enum class OpusFrameStatus {
   decoded,
   redundant,
@@ -26,10 +36,16 @@ struct OpusSimulationSettings {
   int loss_percent = 20;
   int jitter_ms = 25;
   int seed = 1337;
+  OpusLossModel loss_model = OpusLossModel::independent;
+  int burst_min_frames = 2;
+  int burst_max_frames = 5;
   int bitrate_bps = 64000;
   int redundancy_frames = 3;
   int jitter_depth_frames = 6;
+  OpusInputMode input_mode = OpusInputMode::generated;
   audio::SourceMode source_mode = audio::SourceMode::chirp;
+  std::vector<float> input_samples;
+  std::string input_label;
   OpusRecoveryMode recovery_mode = OpusRecoveryMode::fec;
 };
 
@@ -53,6 +69,8 @@ struct OpusSimulationResult {
   int redundant = 0;
   int fec_attempts = 0;
   int plc = 0;
+  int loss_bursts = 0;
+  int max_loss_burst_frames = 0;
   int late_or_missing = 0;
   int decode_errors = 0;
   double avg_latency_ms = 0.0;
@@ -62,6 +80,9 @@ struct OpusSimulationResult {
   double elapsed_ms = 0.0;
   double avg_packet_bytes = 0.0;
   double avg_redundancy_bytes = 0.0;
+  int input_frames = 0;
+  int padded_input_samples = 0;
+  std::string input_label;
 };
 
 inline constexpr int kMaxOpusRedundancyFrames =
@@ -70,5 +91,7 @@ inline constexpr int kMaxOpusRedundancyFrames =
 OpusSimulationResult run_opus_playout_simulation(const OpusSimulationSettings& settings);
 
 const char* status_name(OpusFrameStatus status) noexcept;
+const char* loss_model_name(OpusLossModel model) noexcept;
+const char* input_mode_name(OpusInputMode mode) noexcept;
 
 }  // namespace udp_audio::sim

@@ -22,6 +22,37 @@ constexpr std::size_t kFrameDurationMs = audio::kFrameDurationMs;
 
 using EncodedFrame = codec::EncodedOpusPacket;
 
+int effective_frame_count(const OpusSimulationSettings& settings) {
+  if (settings.input_mode == OpusInputMode::file) {
+    return static_cast<int>((settings.input_samples.size() + kFrameSamples - 1U) /
+                            kFrameSamples);
+  }
+  return std::max(1, settings.frame_count);
+}
+
+audio::MonoAudioFrame make_input_frame(const OpusSimulationSettings& settings,
+                                       int sequence,
+                                       int frame_count,
+                                       audio::SourceState& source_state) {
+  if (settings.input_mode == OpusInputMode::generated) {
+    return audio::make_source_frame(settings.source_mode, static_cast<std::uint32_t>(sequence),
+                                    static_cast<std::size_t>(frame_count), source_state);
+  }
+
+  audio::MonoAudioFrame frame{};
+  frame.sequence = static_cast<std::uint32_t>(sequence);
+  frame.timestamp_samples = frame.sequence * static_cast<std::uint32_t>(kFrameSamples);
+
+  const auto source_offset = static_cast<std::size_t>(sequence) * kFrameSamples;
+  if (source_offset < settings.input_samples.size()) {
+    const auto remaining = settings.input_samples.size() - source_offset;
+    const auto copy_count = std::min(kFrameSamples, remaining);
+    std::copy_n(settings.input_samples.begin() + static_cast<std::ptrdiff_t>(source_offset),
+                copy_count, frame.samples.begin());
+  }
+  return frame;
+}
+
 bool encode_frames(const OpusSimulationSettings& settings,
                    std::vector<EncodedFrame>& encoded_frames,
                    int encode_frame_count,
@@ -45,9 +76,7 @@ bool encode_frames(const OpusSimulationSettings& settings,
   audio::SourceState source_state{};
   encoded_frames.resize(static_cast<std::size_t>(encode_frame_count));
   for (int i = 0; i < encode_frame_count; ++i) {
-    const auto frame =
-      audio::make_source_frame(settings.source_mode, static_cast<std::uint32_t>(i),
-                               static_cast<std::size_t>(encode_frame_count), source_state);
+    const auto frame = make_input_frame(settings, i, encode_frame_count, source_state);
     auto& encoded = encoded_frames[static_cast<std::size_t>(i)];
     const auto byte_count = opus_encode_float(
       encoder, frame.samples.data(), static_cast<int>(kFrameSamples), encoded.payload.data(),
@@ -133,16 +162,97 @@ std::optional<codec::OpusPacketBundle> make_bundle(
                                   encoded.timestamp_samples);
 }
 
+void mark_dropped_frame(int frame_index,
+                        std::vector<bool>& dropped,
+                        OpusSimulationResult& result,
+                        int& current_burst_length) {
+  dropped[static_cast<std::size_t>(frame_index)] = true;
+  ++result.dropped;
+  ++current_burst_length;
+  result.max_loss_burst_frames = std::max(result.max_loss_burst_frames, current_burst_length);
+}
+
+void generate_independent_loss_schedule(const OpusSimulationSettings& settings,
+                                        int frame_count,
+                                        std::mt19937& rng,
+                                        std::uniform_int_distribution<int>& jitter_distribution,
+                                        std::vector<bool>& dropped,
+                                        std::vector<double>& arrival_ms,
+                                        OpusSimulationResult& result) {
+  std::uniform_int_distribution<int> loss_distribution(1, 100);
+  int current_burst_length = 0;
+  for (int i = 0; i < frame_count; ++i) {
+    if (settings.loss_percent > 0 && loss_distribution(rng) <= settings.loss_percent) {
+      if (current_burst_length == 0) {
+        ++result.loss_bursts;
+      }
+      mark_dropped_frame(i, dropped, result, current_burst_length);
+    } else {
+      current_burst_length = 0;
+    }
+    const double jitter_ms =
+      !dropped[static_cast<std::size_t>(i)] && settings.jitter_ms > 0
+        ? jitter_distribution(rng)
+        : 0.0;
+    arrival_ms[static_cast<std::size_t>(i)] =
+      static_cast<double>(i * static_cast<int>(kFrameDurationMs)) + jitter_ms;
+  }
+}
+
+void generate_burst_loss_schedule(const OpusSimulationSettings& settings,
+                                  int frame_count,
+                                  std::mt19937& rng,
+                                  std::vector<bool>& dropped,
+                                  OpusSimulationResult& result) {
+  const int min_burst = std::clamp(settings.burst_min_frames, 1, frame_count);
+  const int max_burst = std::clamp(settings.burst_max_frames, min_burst, frame_count);
+  const double average_burst =
+    (static_cast<double>(min_burst) + static_cast<double>(max_burst)) * 0.5;
+  const double burst_start_probability =
+    std::clamp(static_cast<double>(std::max(0, settings.loss_percent)) /
+                 (100.0 * average_burst),
+               0.0, 1.0);
+
+  std::uniform_real_distribution<double> start_distribution(0.0, 1.0);
+  std::uniform_int_distribution<int> length_distribution(min_burst, max_burst);
+
+  for (int i = 0; i < frame_count;) {
+    if (settings.loss_percent <= 0 || start_distribution(rng) > burst_start_probability) {
+      ++i;
+      continue;
+    }
+
+    ++result.loss_bursts;
+    int current_burst_length = 0;
+    const int burst_length = length_distribution(rng);
+    for (int j = 0; j < burst_length && i < frame_count; ++j, ++i) {
+      mark_dropped_frame(i, dropped, result, current_burst_length);
+    }
+  }
+}
+
 }  // namespace
 
 OpusSimulationResult run_opus_playout_simulation(const OpusSimulationSettings& settings) {
   const auto started = Clock::now();
   OpusSimulationResult result{};
-  result.generated = settings.frame_count;
+  if (settings.input_mode == OpusInputMode::file && settings.input_samples.empty()) {
+    result.error = "No input audio loaded";
+    return result;
+  }
 
   const int effective_redundancy_frames =
     std::clamp(settings.redundancy_frames, 0, kMaxOpusRedundancyFrames);
-  const int encoded_frame_count = settings.frame_count;
+  const int encoded_frame_count = effective_frame_count(settings);
+  result.generated = encoded_frame_count;
+  result.input_frames = encoded_frame_count;
+  result.input_label =
+    settings.input_label.empty() ? input_mode_name(settings.input_mode) : settings.input_label;
+  if (settings.input_mode == OpusInputMode::file) {
+    result.padded_input_samples =
+      static_cast<int>((static_cast<std::size_t>(encoded_frame_count) * kFrameSamples) -
+                       settings.input_samples.size());
+  }
 
   std::vector<EncodedFrame> encoded_frames;
   if (!encode_frames(settings, encoded_frames, encoded_frame_count, result)) {
@@ -169,24 +279,23 @@ OpusSimulationResult run_opus_playout_simulation(const OpusSimulationSettings& s
   result.avg_redundancy_bytes /= std::max(1, encoded_frame_count);
 
   std::mt19937 rng(static_cast<std::uint32_t>(settings.seed));
-  std::uniform_int_distribution<int> loss_distribution(1, 100);
   std::uniform_int_distribution<int> jitter_distribution(0, std::max(0, settings.jitter_ms));
   std::vector<bool> dropped(static_cast<std::size_t>(encoded_frame_count), false);
   std::vector<double> arrival_ms(static_cast<std::size_t>(encoded_frame_count), 0.0);
 
-  for (int i = 0; i < encoded_frame_count; ++i) {
-    dropped[static_cast<std::size_t>(i)] =
-      i < settings.frame_count && settings.loss_percent > 0 &&
-      loss_distribution(rng) <= settings.loss_percent;
-    const double jitter_ms =
-      !dropped[static_cast<std::size_t>(i)] && settings.jitter_ms > 0
-        ? jitter_distribution(rng)
-        : 0.0;
-    arrival_ms[static_cast<std::size_t>(i)] =
-      static_cast<double>(i * static_cast<int>(kFrameDurationMs)) + jitter_ms;
-    if (i < settings.frame_count && dropped[static_cast<std::size_t>(i)]) {
-      ++result.dropped;
+  if (settings.loss_model == OpusLossModel::burst) {
+    generate_burst_loss_schedule(settings, encoded_frame_count, rng, dropped, result);
+    for (int i = 0; i < encoded_frame_count; ++i) {
+      const double jitter_ms =
+        !dropped[static_cast<std::size_t>(i)] && settings.jitter_ms > 0
+          ? jitter_distribution(rng)
+          : 0.0;
+      arrival_ms[static_cast<std::size_t>(i)] =
+        static_cast<double>(i * static_cast<int>(kFrameDurationMs)) + jitter_ms;
     }
+  } else {
+    generate_independent_loss_schedule(settings, encoded_frame_count, rng, jitter_distribution,
+                                       dropped, arrival_ms, result);
   }
 
   int opus_error = OPUS_OK;
@@ -197,10 +306,10 @@ OpusSimulationResult run_opus_playout_simulation(const OpusSimulationSettings& s
     return result;
   }
 
-  result.frames.resize(static_cast<std::size_t>(settings.frame_count));
-  result.samples.reserve(static_cast<std::size_t>(settings.frame_count) * kFrameSamples);
+  result.frames.resize(static_cast<std::size_t>(encoded_frame_count));
+  result.samples.reserve(static_cast<std::size_t>(encoded_frame_count) * kFrameSamples);
 
-  for (int sequence = 0; sequence < settings.frame_count; ++sequence) {
+  for (int sequence = 0; sequence < encoded_frame_count; ++sequence) {
     const double playout_ms =
       static_cast<double>((sequence + settings.jitter_depth_frames) *
                           static_cast<int>(kFrameDurationMs));
@@ -281,7 +390,7 @@ OpusSimulationResult run_opus_playout_simulation(const OpusSimulationSettings& s
   opus_decoder_destroy(decoder);
 
   result.avg_latency_ms /= std::max(1, result.decoded);
-  result.avg_playout_ms /= std::max(1, settings.frame_count);
+  result.avg_playout_ms /= std::max(1, encoded_frame_count);
 
   const auto stride =
     std::max<std::size_t>(1U, result.samples.size() / kMaxPlotSamples);
@@ -303,6 +412,26 @@ const char* status_name(OpusFrameStatus status) noexcept {
       return "fec";
     case OpusFrameStatus::plc:
       return "plc";
+  }
+  return "unknown";
+}
+
+const char* loss_model_name(OpusLossModel model) noexcept {
+  switch (model) {
+    case OpusLossModel::independent:
+      return "independent";
+    case OpusLossModel::burst:
+      return "burst";
+  }
+  return "unknown";
+}
+
+const char* input_mode_name(OpusInputMode mode) noexcept {
+  switch (mode) {
+    case OpusInputMode::generated:
+      return "generated";
+    case OpusInputMode::file:
+      return "file";
   }
   return "unknown";
 }
